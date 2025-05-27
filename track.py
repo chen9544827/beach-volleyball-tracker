@@ -5,7 +5,7 @@ import numpy as np
 import os
 
 # ---------- YOLOv8 模型载入（GPU） ----------
-model = YOLO("yolov8s.pt").to("cuda")
+model = YOLO("yolo11s.pt").to("cuda")
 
 # ---------- 影片路径与输出路径 ----------
 video_path = "input_video/test.mp4"
