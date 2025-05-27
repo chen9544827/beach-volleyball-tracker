@@ -1,5 +1,5 @@
+roboflow
 ultralytics
-norfair
 opencv-python
 numpy
 torch
