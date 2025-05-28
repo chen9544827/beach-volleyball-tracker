@@ -160,8 +160,8 @@ cython_debug/
 #.idea/
 
 # 影片與輸出結果
-input_videos/
-output_videos/
+input_video/
+output_video/
 
 # 模型權重與結果
 *.pt
