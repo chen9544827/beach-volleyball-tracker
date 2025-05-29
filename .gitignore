@@ -162,6 +162,7 @@ cython_debug/
 # 影片與輸出結果
 input_video/
 output_video/
+logs/
 
 # 模型權重與結果
 *.pt
