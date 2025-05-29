@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--device",     type=str, default="0", help="GPU 设备 ID，例如 '0'")
     args = parser.parse_args()
 
-    # 准备输出目录
+    # 准备输出目
     os.makedirs(args.output_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(args.input))[0]
     output_video = os.path.join(args.output_dir, f"{base}_output.avi")
