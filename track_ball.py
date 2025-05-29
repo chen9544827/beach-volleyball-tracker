@@ -1,32 +1,29 @@
 import os
 import cv2
 import argparse
-import numpy as np
 from ultralytics import YOLO
-from norfair import Detection, Tracker
+import numpy as np
 
-# ---------- YOLO 检测结果 转 Norfair Detection ----------
-def yolo_to_norfair(boxes):
-    xywh    = boxes.xywh.cpu().numpy()    # [x_center, y_center, w, h]
-    confs   = boxes.conf.cpu().numpy()
-    classes = boxes.cls.cpu().numpy().astype(int)
-    dets = []
-    for (x, y, w, h), c, cls in zip(xywh, confs, classes):
-        if cls == 32:  # COCO sports ball
-            dets.append(Detection(np.array([x, y]), scores=np.array([c])))
-    return dets
-
-
+# ---------- 简单的排球检测示例（同时输出视频、逐帧原始图像及YOLO格式标签） ----------
 def main():
-    parser = argparse.ArgumentParser(description="GPU 加速的沙滩排球跟踪与发球检测")
-    parser.add_argument("--input",  type=str, required=True, help="输入视频路径")
-    parser.add_argument("--output", type=str, default="output_video/ball_track_gpu.avi", help="输出视频路径")
-    parser.add_argument("--model",  type=str, default="runs/train/exp0/weights/best.pt", help="自训练模型权重文件路径")
-    parser.add_argument("--conf",   type=float, default=0.3, help="检测置信度阈值")
-    parser.add_argument("--device", type=str, default="0", help="GPU 设备 id，例如 '0' 或 '0,1'")
+    parser = argparse.ArgumentParser(description="使用自训练 YOLO11 模型进行排球检测，输出视频、逐帧原始图像及标签文件")
+    parser.add_argument("--input",      type=str, required=True, help="输入视频路径")
+    parser.add_argument("--output_dir", type=str, default="output_video", help="输出目录")
+    parser.add_argument("--model",      type=str, default="runs/detect/train7/weights/best.pt", help="模型权重文件路径")
+    parser.add_argument("--conf",       type=float, default=0.3, help="检测置信度阈值")
+    parser.add_argument("--device",     type=str, default="0", help="GPU 设备 ID，例如 '0'")
     args = parser.parse_args()
 
-    # 视频初始化
+    # 准备输出目录
+    os.makedirs(args.output_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(args.input))[0]
+    output_video = os.path.join(args.output_dir, f"{base}_output.avi")
+    frames_dir   = os.path.join(args.output_dir, f"{base}_frames")
+    labels_dir   = os.path.join(args.output_dir, f"{base}_labels")
+    os.makedirs(frames_dir, exist_ok=True)
+    os.makedirs(labels_dir, exist_ok=True)
+
+    # 打开视频
     cap = cv2.VideoCapture(args.input)
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频: {args.input}")
@@ -34,76 +31,64 @@ def main():
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # 输出文件 & 目录
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out    = cv2.VideoWriter(args.output, fourcc, fps, (width, height))
+    # VideoWriter
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out    = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
     if not out.isOpened():
-        raise RuntimeError(f"无法打开 VideoWriter: {args.output}")
+        raise RuntimeError(f"无法打开 VideoWriter: {output_video}")
 
-    # 加载 自训练 YOLO11 模型 并移动到 GPU
+    # 设置 GPU 并加载模型
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device
     model = YOLO(args.model).to('cuda')
 
-    # 初始化 Norfair 追踪器
-    tracker = Tracker(distance_function="euclidean", distance_threshold=30)
-
-    prev_has_ball = False
-    serve_events  = []  # 记录发球帧序号
-    frame_idx     = 0
-
+    frame_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # 1) YOLO 推理 on GPU
-        results = model(frame, conf=args.conf, classes=[32])[0]
+        # 复制原始帧用于保存
+        original_frame = frame.copy()
 
-        # 2) 绘制检测框
+        # 只检测 volleyball 类 (class_id=0)
+        results = model(frame, conf=args.conf, classes=[0])[0]
+
+        # YOLO txt 标签内容
+        txt_lines = []
+
+        # 在 frame 上绘制检测框并生成标签行
         for box in results.boxes:
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-            conf = float(box.conf.cpu().numpy()[0])
+            conf_score = float(box.conf[0].cpu().numpy())
+            # 画框在 frame
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(frame, f"ball {conf:.2f}", (x1, y1-5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+            cv2.putText(frame, f"ball {conf_score:.2f}", (x1, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            # 生成归一化标签
+            cx = (x1 + x2) / 2 / width
+            cy = (y1 + y2) / 2 / height
+            w  = (x2 - x1) / width
+            h  = (y2 - y1) / height
+            txt_lines.append(f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
 
-        # 3) Norfair 更新
-        detections = yolo_to_norfair(results.boxes)
-        tracks     = tracker.update(detections)
-        has_ball   = len(tracks) > 0
-
-        # 4) 发球检测
-        if not prev_has_ball and has_ball:
-            serve_frame = frame_idx
-            serve_events.append(serve_frame)
-            cv2.putText(frame, f"Serve frame: {serve_frame}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
-        prev_has_ball = has_ball
-
-        # 5) 绘制轨迹 & ID
-        for track in tracks:
-            est = np.array(track.estimate).flatten()
-            if est.size < 2:
-                continue
-            x, y = int(est[0]), int(est[1])
-            cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
-            cv2.putText(frame, str(track.id), (x+5, y+5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
-            # 绘制历史轨迹
-            history = [np.array(h).flatten() for h in track.estimate_history]
-            for i in range(1, len(history)):
-                p1 = tuple(history[i-1][:2].astype(int))
-                p2 = tuple(history[i][:2].astype(int))
-                cv2.line(frame, p1, p2, (255, 0, 0), 2)
-
-        # 写入输出
+        # 写入带标记的视频帧
         out.write(frame)
+        # 保存原始未标记帧到图像文件
+        frame_path = os.path.join(frames_dir, f"frame_{frame_idx:06d}.jpg")
+        cv2.imwrite(frame_path, original_frame)
+
+        # 保存标签文件
+        label_path = os.path.join(labels_dir, f"frame_{frame_idx:06d}.txt")
+        with open(label_path, 'w') as f:
+            f.write("\n".join(txt_lines))
+
         frame_idx += 1
 
     cap.release()
     out.release()
-    print("Tracking complete. Serve frames:", serve_events)
+    print(f"检测完成，输出视频: {output_video}")
+    print(f"帧原始图像已保存至: {frames_dir}")
+    print(f"标签文件已保存至: {labels_dir}")
 
 if __name__ == "__main__":
     main()
