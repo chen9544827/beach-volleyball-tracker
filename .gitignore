@@ -176,6 +176,8 @@ __pycache__/
 *.log
 *.tmp
 .DS_Store
+*.jpg
+*.txt
 
 # VSCode 設定（如果你用 VSCode）
 .vscode/
