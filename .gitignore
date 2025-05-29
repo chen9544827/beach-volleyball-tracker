@@ -169,6 +169,7 @@ logs/
 runs/
 weights/
 checkpoints/
+dataset/
 
 # 暫存與系統
 __pycache__/
