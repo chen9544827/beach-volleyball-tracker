@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="排球检测，静止球过滤，按视频创建输出文件夹")
     parser.add_argument("--input",      type=str, required=True, help="输入视频路径")
     parser.add_argument("--output_dir", type=str, default="output_video", help="输出父目录")
-    parser.add_argument("--model",      type=str, default="runs/detect/train8/weights/best.pt", help="模型权重路径")
+    parser.add_argument("--model",      type=str, default="model/best.pt", help="模型权重路径")
     parser.add_argument("--conf",       type=float, default=0.3, help="检测置信度阈值")
     parser.add_argument("--device",     type=str, default="0", help="GPU 设备 ID，示例 '0'")
     args = parser.parse_args()

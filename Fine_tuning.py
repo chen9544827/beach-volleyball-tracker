@@ -11,30 +11,21 @@ epochs           = 30                                          # 训练世代
 imgsz            = 960                                         # 输入图片尺寸
 batch_size       = 16                                          # 批量大小
 device           = "0"                                        # 'cpu' 或 GPU id
-freeze_backbone  = True                                        # 是否冻结 backbone，仅微调 Detect 层
 # ================================
 
 def main():
-    # 加载预训练模型（只检测 ball）
+    # 加载预训练模型（包含 ball-only 权重）
     model = YOLO(model_path)
 
-    # 可选冻结 backbone
-    if freeze_backbone:
-        # 冻结除 Detect 层外的所有参数
-        for name, param in model.model.named_parameters():
-            param.requires_grad = False
-        # 解冻 Detect 层
-        for param in model.model.model[-1].parameters():
-            param.requires_grad = True
-        print("Backbone frozen, only Detect layer will be trained.")
-
-    # 开始训练
+    # 增量微调：只冻结 backbone（block0），保持 Detect 层包括分类头可训练
+    # 使用 train 中的 freeze 参数更可靠
     model.train(
         data=data_yaml,
         epochs=epochs,
         imgsz=imgsz,
         batch=batch_size,
         device=device,
+        freeze=[0],             # 冻结 backbone；解除 Detect 层所有通道更新
         name="ball_player_schemeB",
         exist_ok=True
     )
