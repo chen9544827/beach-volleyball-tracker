@@ -23,6 +23,10 @@ def parse_args():
         "--output_dir", type=str, required=True,
         help="输出合并后数据集的根目录"
     )
+    parser.add_argument(
+        "--max_ball", type=int, default=None,
+        help="每个子集最多保留的 ball 样本数，默认全部保留"
+    )
     return parser.parse_args()
 
 
@@ -42,7 +46,7 @@ def copy_and_remap_labels(src_label, dst_label, remap=False):
             f_dst.write(' '.join([cls] + coords) + '\n')
 
 
-def merge_subset(subset, ball_dir, player_dir, out_dir):
+def merge_subset(subset, ball_dir, player_dir, out_dir, max_ball=None):
     # 输入子集目录
     ball_img_dir = os.path.join(ball_dir, subset, 'images')
     ball_lbl_dir = os.path.join(ball_dir, subset, 'labels')
@@ -56,8 +60,11 @@ def merge_subset(subset, ball_dir, player_dir, out_dir):
     ensure_dir(out_lbl_dir)
 
     idx = 0
-    # 合并 ball 数据
+        # 合并 ball 数据
+    ball_count = 0
     for fname in sorted(os.listdir(ball_img_dir)):
+        if max_ball is not None and ball_count >= max_ball:
+            break
         if not fname.lower().endswith(('.jpg', '.png')):
             continue
         base = f"{idx:06d}"
@@ -70,6 +77,7 @@ def merge_subset(subset, ball_dir, player_dir, out_dir):
         dst_lbl = os.path.join(out_lbl_dir, base + '.txt')
         copy_and_remap_labels(src_lbl, dst_lbl, remap=False)
         idx += 1
+        ball_count += 1
 
     # 合并 player 数据
     for fname in sorted(os.listdir(plr_img_dir)):
@@ -93,7 +101,7 @@ def main():
     args = parse_args()
     subsets = ['train', 'valid', 'test']
     for subset in subsets:
-        merge_subset(subset, args.ball_dir, args.player_dir, args.output_dir)
+        merge_subset(subset, args.ball_dir, args.player_dir, args.output_dir, args.max_ball)
     print(f"All subsets merged into {args.output_dir}")
 
 if __name__ == '__main__':
