@@ -1,64 +1,100 @@
+#!/usr/bin/env python3
+# merge_datasets.py
+# 结合两个单类YOLO数据集（ball & player），支持train/valid/test三分法
+
 import os
-import random
 import shutil
-from glob import glob
+import argparse
 
-# ---------- 配置区：请根据实际下载路径修改 ----------
-indoor_root = "path/to/indoor_dataset"   # 室内数据集根目录，含 train/valid/test 子目录
-beach_root  = "path/to/beach_dataset"    # 沙滩数据集根目录，含 train/valid/test 子目录
-output_root = "dataset_combined"         # 合并后输出根目录
-sampling_ratio = 1  # 室内采样数量 = 沙滩数量 × sampling_ratio
 
-# 支持的图片扩展名
-IMG_EXTS = ['.jpg', '.jpeg', '.png']
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Merge two single-class YOLO datasets into one multi-class dataset with train/valid/test splits."
+    )
+    parser.add_argument(
+        "--ball_dir", type=str, required=True,
+        help="只含 ball 标签的数据集根目录（包含 train/valid/test 子目录）"
+    )
+    parser.add_argument(
+        "--player_dir", type=str, required=True,
+        help="只含 player 标签的数据集根目录（包含 train/valid/test 子目录）"
+    )
+    parser.add_argument(
+        "--output_dir", type=str, required=True,
+        help="输出合并后数据集的根目录"
+    )
+    return parser.parse_args()
 
-# 数据集拆分
-splits = ["train", "valid", "test"]
 
-for split in splits:
-    # 定义各自的 images/labels 目录
-    indoor_img_dir = os.path.join(indoor_root, split, "images")
-    indoor_lbl_dir = os.path.join(indoor_root, split, "labels")
-    beach_img_dir  = os.path.join(beach_root,  split, "images")
-    beach_lbl_dir  = os.path.join(beach_root,  split, "labels")
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
 
-    # 列出沙滩图片并统计
-    beach_images = [f for f in glob(os.path.join(beach_img_dir, "*")) \
-                    if os.path.splitext(f)[1].lower() in IMG_EXTS]
-    beach_count = len(beach_images)
 
-    # 计算室内采样数量
-    indoor_images_all = [f for f in glob(os.path.join(indoor_img_dir, "*")) \
-                         if os.path.splitext(f)[1].lower() in IMG_EXTS]
-    sample_count = min(beach_count * sampling_ratio, len(indoor_images_all))
+def copy_and_remap_labels(src_label, dst_label, remap=False):
+    with open(src_label, 'r') as f_src, open(dst_label, 'w') as f_dst:
+        for line in f_src:
+            parts = line.strip().split()
+            if len(parts) != 5:
+                continue
+            cls, *coords = parts
+            if remap:
+                cls = '1'  # player 的 class id 从 0 重映射为 1
+            f_dst.write(' '.join([cls] + coords) + '\n')
 
-    # 随机采样室内图片
-    sampled_indoor = random.sample(indoor_images_all, sample_count)
 
-    # 创建输出目录结构
-    out_img_dir = os.path.join(output_root, "images", split)
-    out_lbl_dir = os.path.join(output_root, "labels", split)
-    os.makedirs(out_img_dir, exist_ok=True)
-    os.makedirs(out_lbl_dir, exist_ok=True)
+def merge_subset(subset, ball_dir, player_dir, out_dir):
+    # 输入子集目录
+    ball_img_dir = os.path.join(ball_dir, subset, 'images')
+    ball_lbl_dir = os.path.join(ball_dir, subset, 'labels')
+    plr_img_dir  = os.path.join(player_dir, subset, 'images')
+    plr_lbl_dir  = os.path.join(player_dir, subset, 'labels')
 
-    # 拷贝采样后的室内图片及对应标签
-    for img_path in sampled_indoor:
-        fname = os.path.basename(img_path)
-        shutil.copy(img_path, os.path.join(out_img_dir, fname))
-        lbl_name = os.path.splitext(fname)[0] + ".txt"
-        src_lbl = os.path.join(indoor_lbl_dir, lbl_name)
-        if os.path.isfile(src_lbl):
-            shutil.copy(src_lbl, os.path.join(out_lbl_dir, lbl_name))
+    # 输出子集目录
+    out_img_dir = os.path.join(out_dir, subset, 'images')
+    out_lbl_dir = os.path.join(out_dir, subset, 'labels')
+    ensure_dir(out_img_dir)
+    ensure_dir(out_lbl_dir)
 
-    # 拷贝所有沙滩图片及对应标签
-    for img_path in beach_images:
-        fname = os.path.basename(img_path)
-        shutil.copy(img_path, os.path.join(out_img_dir, fname))
-        lbl_name = os.path.splitext(fname)[0] + ".txt"
-        src_lbl = os.path.join(beach_lbl_dir, lbl_name)
-        if os.path.isfile(src_lbl):
-            shutil.copy(src_lbl, os.path.join(out_lbl_dir, lbl_name))
+    idx = 0
+    # 合并 ball 数据
+    for fname in sorted(os.listdir(ball_img_dir)):
+        if not fname.lower().endswith(('.jpg', '.png')):
+            continue
+        base = f"{idx:06d}"
+        # 复制图片
+        src_img = os.path.join(ball_img_dir, fname)
+        dst_img = os.path.join(out_img_dir, base + os.path.splitext(fname)[1])
+        shutil.copy(src_img, dst_img)
+        # 复制标签
+        src_lbl = os.path.join(ball_lbl_dir, os.path.splitext(fname)[0] + '.txt')
+        dst_lbl = os.path.join(out_lbl_dir, base + '.txt')
+        copy_and_remap_labels(src_lbl, dst_lbl, remap=False)
+        idx += 1
 
-    print(f"[{split}] 采样室内: {sample_count} 张, 合并沙滩: {beach_count} 张, 总计: {sample_count + beach_count} 张")
+    # 合并 player 数据
+    for fname in sorted(os.listdir(plr_img_dir)):
+        if not fname.lower().endswith(('.jpg', '.png')):
+            continue
+        base = f"{idx:06d}"
+        # 复制图片
+        src_img = os.path.join(plr_img_dir, fname)
+        dst_img = os.path.join(out_img_dir, base + os.path.splitext(fname)[1])
+        shutil.copy(src_img, dst_img)
+        # 复制并重映射标签
+        src_lbl = os.path.join(plr_lbl_dir, os.path.splitext(fname)[0] + '.txt')
+        dst_lbl = os.path.join(out_lbl_dir, base + '.txt')
+        copy_and_remap_labels(src_lbl, dst_lbl, remap=True)
+        idx += 1
 
-print("数据合并完成，路径：", output_root)
+    print(f"Subset '{subset}' merged {idx} images.")
+
+
+def main():
+    args = parse_args()
+    subsets = ['train', 'valid', 'test']
+    for subset in subsets:
+        merge_subset(subset, args.ball_dir, args.player_dir, args.output_dir)
+    print(f"All subsets merged into {args.output_dir}")
+
+if __name__ == '__main__':
+    main()
