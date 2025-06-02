@@ -46,7 +46,7 @@ def extract_single_score_from_ocr(ocr_text):
 def parse_arguments():
     parser = argparse.ArgumentParser(description="根據OCR分數變化分割影片，並將長片段放入特定資料夾。")
     parser.add_argument("--input", type=str, required=True, help="輸入的長時間影片檔案路徑")
-    parser.add_argument("--output_dir", type=str, default="video_segments_output", help="儲存分割後影片片段的根目錄")
+    parser.add_argument("--output_dir", type=str, default="output_data/video_segments_output", help="儲存分割後影片片段的根目錄")
     parser.add_argument("--min_segment_duration", type=int, default=10, help="有效比賽片段的最小持續時間 (秒)")
     parser.add_argument("--long_segment_threshold", type=int, default=90, help="長片段的閾值 (秒)，超過此時間的片段會放入 'long_segments' 資料夾")
     parser.add_argument("--score_check_interval", type=float, default=1.0, help="每隔多少秒檢查一次分數 (可以是小數)")
@@ -68,7 +68,7 @@ def finalize_segment_processing(temp_filename, segment_frames_written, fps, min_
         return
 
     duration_sec = segment_frames_written / fps
-    final_base_name = f"segment_{segment_id_counter:03d}.mp4" # 或者使用其他你喜歡的影片格式和編碼
+    final_base_name = f"segment_{segment_id_counter:03d}.avi" #x 或者使用其他你喜歡的影片格式和編碼
 
     if duration_sec < min_duration_sec:
         print(f"片段 {final_base_name} ({duration_sec:.1f}s) 過短 (少於 {min_duration_sec}s)，將被刪除。")
