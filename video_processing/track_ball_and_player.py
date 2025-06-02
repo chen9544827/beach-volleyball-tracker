@@ -4,7 +4,17 @@ import cv2
 import argparse
 import numpy as np
 from ultralytics import YOLO
-from court_config_generator import define_court_boundaries_manually, load_court_geometry 
+import sys
+# --- 設定Python導入路徑，以便找到 court_definition 模組 ---
+# 獲取目前腳本 (track_ball_and_player.py) 所在的目錄 (video_processing/)
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+# 獲取專案根目錄 (beach-volleyball-tracker/)
+project_root = os.path.dirname(current_script_dir)
+# 將專案根目錄添加到 sys.path，這樣Python就能找到其他子目錄中的模組
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from court_definition.court_config_generator import define_court_boundaries_manually, load_court_geometry
 
 def parse_args():
     p = argparse.ArgumentParser(description="同时使用两个模型：排球检测（带运动过滤）和选手检测（仅标出场上4位选手）")
@@ -143,7 +153,8 @@ def main():
     args = parse_args()
 
 
-    config_file_path = "court_config.json" # 設定檔的路徑
+    config_file_path = os.path.join(project_root, "court_config.json") 
+
 
      # 檢查設定檔是否存在，如果不存在，或使用者選擇重新定義，則運行定義程序
     if not os.path.exists(config_file_path):
