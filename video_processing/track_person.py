@@ -15,8 +15,8 @@ from ultralytics import YOLO
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate YOLO dataset from video with only player labels.")
     parser.add_argument("--input_video", type=str, required=True,help="输入视频文件路径")
-    parser.add_argument("--output_dir", type=str, default="output_player_dataset",help="生成数据集的根目录")
-    parser.add_argument("--player_model", type=str, default="model/yolo11s.pt",help="球员检测模型路径 (如 yolo11s.pt 或 COCO 预训练权重)")
+    parser.add_argument("--output_dir", type=str, default="../output_player_dataset",help="生成数据集的根目录")
+    parser.add_argument("--player_model", type=str, default="../model/yolo11s.pt",help="球员检测模型路径 (如 yolo11s.pt 或 COCO 预训练权重)")
     parser.add_argument("--conf", type=float, default=0.3,help="置信度阈值")
     parser.add_argument("--frame_step", type=int, default=1,help="每隔多少帧保存一次 (默认1: 每帧)")
     parser.add_argument("--device", type=str, default="0",help="推理设备: 'cpu' or GPU id")
