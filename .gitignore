@@ -178,6 +178,6 @@ __pycache__/
 *.jpg
 *.txt
 *json
-
+*.avi
 # VSCode 設定（如果你用 VSCode）
 .vscode/
