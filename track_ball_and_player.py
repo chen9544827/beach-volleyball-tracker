@@ -4,7 +4,7 @@ import cv2
 import argparse
 import numpy as np
 from ultralytics import YOLO
-
+from court_config_generator import define_court_boundaries_manually, load_court_geometry 
 
 def parse_args():
     p = argparse.ArgumentParser(description="同时使用两个模型：排球检测（带运动过滤）和选手检测（仅标出场上4位选手）")
@@ -57,32 +57,49 @@ def detect_ball(frame, ball_model, fgmask, kernel, conf_thresh):
     return ball_boxes
 
 
-def detect_player(frame, player_model, fgmask, conf_thresh):
+def detect_player_by_proximity(frame, player_model, conf_thresh, court_center_x, court_center_y):
     """
-    在单帧图像上检测选手（person），场上只有 4 位选手，
-    使用运动过滤剔除静止或不动人物，再按面积排序保留最多四个。
+    偵測畫面中的所有 'person'，並選出離場地中心最近的4位作為球員。
+    不再使用運動過濾。
     返回 list of tuples: (x1, y1, x2, y2, confidence)
     """
-    # 推理只保留 class 0 (COCO person 对应的索引通常是 0)
-    res_player = player_model(frame, conf=conf_thresh, classes=[0])[0]
-    player_boxes = []
-    for box in res_player.boxes:
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-        # 运动过滤：计算该框区域在 fgmask 上的运动比率
-        roi = fgmask[y1:y2, x1:x2]
-        if roi.size == 0:
-            continue
-        motion_ratio = np.count_nonzero(roi) / roi.size
-        if motion_ratio < 0.01:
-            continue  # 过滤静止人员
-        conf_score = float(box.conf[0].cpu().numpy())
-        # 计算面积用于排序
-        area = (x2 - x1) * (y2 - y1)
-        player_boxes.append((x1, y1, x2, y2, conf_score, area))
-    # 按面积排序，仅保留前 4
-    player_boxes = sorted(player_boxes, key=lambda x: x[5], reverse=True)[:4]
-    # 移除面积字段
-    return [(x1, y1, x2, y2, conf) for (x1, y1, x2, y2, conf, area) in player_boxes]
+    # 推理，假設 'person' 類別的索引是 0 (COCO 模型中的典型值)
+    results = player_model(frame, conf=conf_thresh, classes=[0])[0] 
+    
+    detected_persons_with_distance = []
+    for box in results.boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy()) # 將座標轉為整數
+        confidence = float(box.conf[0].cpu().numpy())
+        
+        # 計算偵測到的 person 的中心點
+        person_cx = (x1 + x2) / 2
+        person_cy = (y1 + y2) / 2
+        
+        # 計算該 person 中心到場地中心的距離
+        distance = np.sqrt((person_cx - court_center_x)**2 + (person_cy - court_center_y)**2)
+        
+        detected_persons_with_distance.append({
+            "box_coords": (x1, y1, x2, y2),
+            "confidence": confidence,
+            "distance_to_center": distance
+        })
+        
+    # 根據到場地中心的距離進行排序 (由近到遠)
+    sorted_persons = sorted(detected_persons_with_distance, key=lambda p: p["distance_to_center"])
+    
+    # 選取距離最近的4位
+    top_4_players_data = sorted_persons[:4]
+    
+    # 準備回傳結果，格式與原來的 detect_player 保持一致
+    output_player_boxes = []
+    for player_data in top_4_players_data:
+        output_player_boxes.append((*player_data["box_coords"], player_data["confidence"]))
+        
+    return output_player_boxes
+
+# 你可以選擇保留舊的 detect_player 函數並將新的命名為 detect_player_by_proximity，
+# 或者直接用新邏輯覆蓋舊的 detect_player 函數。
+# 如果覆蓋，記得更新 main 函數中的調用。為了清楚，這裡我們用新名字。
 
 
 def draw_and_save(frame, ball_boxes, player_boxes, w, h, frame_idx, frame_dir, label_dir):
@@ -125,6 +142,58 @@ def draw_and_save(frame, ball_boxes, player_boxes, w, h, frame_idx, frame_dir, l
 def main():
     args = parse_args()
 
+
+    config_file_path = "court_config.json" # 設定檔的路徑
+
+     # 檢查設定檔是否存在，如果不存在，或使用者選擇重新定義，則運行定義程序
+    if not os.path.exists(config_file_path):
+        print(f"場地設定檔 '{config_file_path}' 不存在。")
+        print("現在將啟動首次場地邊界定義程序...")
+        if not define_court_boundaries_manually(args.input, config_file_path):
+            print("場地邊界定義未完成或已取消。程式無法繼續。")
+            return # 結束程式
+    else:
+        # 如果設定檔已存在，可以詢問使用者是否要重新定義
+        user_choice = input(f"場地設定檔 '{config_file_path}' 已存在。是否要重新定義場地邊界? (y/N): ").strip().lower()
+        if user_choice == 'y':
+            print("重新定義場地邊界...")
+            if not define_court_boundaries_manually(args.input, config_file_path):
+                print("場地邊界定義未完成或已取消。將嘗試使用現有設定檔。")
+        else:
+            print(f"將使用現有的場地設定檔: {config_file_path}")
+
+
+       # 載入場地幾何資訊
+    court_geometry = load_court_geometry(config_file_path)
+    if court_geometry is None:
+        print("無法載入場地幾何資訊。請確保已正確定義或設定檔無誤。程式終止。")
+        return
+    
+      # --- 新增：計算場地中心點 ---
+    court_center_x, court_center_y = None, None
+    if "court_boundary_polygon" in court_geometry and \
+       isinstance(court_geometry["court_boundary_polygon"], list) and \
+       len(court_geometry["court_boundary_polygon"]) == 4: # 假設是4個點定義的邊界
+        
+        points = court_geometry["court_boundary_polygon"]
+        # 計算多邊形 (這裡假設為四邊形) 的幾何中心 (質心)
+        # 對於凸四邊形，頂點平均值是一個合理的近似
+        court_center_x = sum(p[0] for p in points) / len(points)
+        court_center_y = sum(p[1] for p in points) / len(points)
+        print(f"計算得到的場地中心點: ({court_center_x:.2f}, {court_center_y:.2f})")
+    else:
+        print("錯誤：'court_boundary_polygon' 未在設定檔中正確定義或不是4個點。")
+        # 可以選擇終止程式，或使用影像中心作為備用方案（但不推薦用於精確判斷）
+        # 獲取影像寬高 (w, h) 後，可用 w/2, h/2
+        # 此處選擇終止，因為場地中心對此功能很重要
+        print("程式因無法確定場地中心而終止。")
+        return
+    # --- 場地中心點計算結束 ---
+
+    print(f"成功載入場地資訊: {court_geometry}")
+    # --- 場地定義與載入結束 ---
+
+
     # 创建输出目录结构
     base     = os.path.splitext(os.path.basename(args.input))[0]
     out_root = os.path.join(args.output_dir, base)
@@ -161,6 +230,8 @@ def main():
     fgbg, kernel = init_bg_subtractor()
 
     frame_idx = 0
+    all_frames_data =[]# <--- 新增：用於儲存所有幀的資訊
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -172,9 +243,41 @@ def main():
 
         # 2) 排球检测并做运动过滤
         ball_boxes = detect_ball(frame, ball_model, fgmask, kernel, args.conf)
-
+ 
         # 3) 选手检测，仅保留置信度最高的4个
-        player_boxes = detect_player(frame, player_model, fgmask, args.conf)
+        player_boxes = detect_player_by_proximity(frame, player_model, args.conf, court_center_x, court_center_y)
+
+
+                # <--- 新增：儲存當前幀的球和球員資訊 --->
+        current_frame_info = {
+            "frame_id": frame_idx,
+            "ball_detections": [], # 儲存球的中心點或邊界框
+            "player_detections": [] # 儲存球員的中心點或邊界框
+        }
+
+        # 處理球的資訊 (範例：儲存球的中心點)
+        if ball_boxes:
+            for (x1, y1, x2, y2, conf) in ball_boxes:
+                ball_center_x = (x1 + x2) / 2
+                ball_center_y = (y1 + y2) / 2
+                current_frame_info["ball_detections"].append({
+                    "center_x": ball_center_x,
+                    "center_y": ball_center_y,
+                    "confidence": conf
+                    # 你也可以儲存原始的 x1, y1, x2, y2
+                })
+        
+        # 處理球員的資訊 (範例：儲存球員的邊界框)
+        if player_boxes:
+            for (x1, y1, x2, y2, conf) in player_boxes:
+                current_frame_info["player_detections"].append({
+                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                    "confidence": conf
+                })
+        
+        all_frames_data.append(current_frame_info)
+        # <--- 資訊儲存結束 --->
+
 
         # 4) 绘制、保存帧与标签
         draw_and_save(frame, ball_boxes, player_boxes, w, h, frame_idx, frame_dir, label_dir)
