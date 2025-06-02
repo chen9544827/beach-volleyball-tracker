@@ -25,8 +25,8 @@ from ultralytics import YOLO
 def parse_args():
     parser = argparse.ArgumentParser(description="排球检测，支持可选背景运动过滤")
     parser.add_argument("--input",      type=str, required=True, help="输入视频路径")
-    parser.add_argument("--output_dir", type=str, default="output_video", help="输出父目录")
-    parser.add_argument("--model",      type=str, default="model/best.pt", help="模型权重路径")
+    parser.add_argument("--output_dir", type=str, default="../output_data", help="输出父目录")
+    parser.add_argument("--model",      type=str, default="../model/best.pt", help="模型权重路径")
     parser.add_argument("--conf",       type=float, default=0.3, help="检测置信度阈值")
     parser.add_argument("--device",     type=str, default="0", help="GPU 设备 ID 或 'cpu'")
     parser.add_argument("--disable_motion", action='store_true',default=True , help="禁用背景运动过滤，仅使用模型检测")#true:禁用過濾
