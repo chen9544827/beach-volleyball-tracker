@@ -161,14 +161,13 @@ cython_debug/
 
 # 影片與輸出結果
 input_video/
-output_video/
+output_data/
 logs/
 
 # 模型權重與結果
 *.pt
 runs/
 weights/
-checkpoints/
 dataset/
 
 # 暫存與系統
