@@ -181,3 +181,4 @@ __pycache__/
 *.avi
 # VSCode 設定（如果你用 VSCode）
 .vscode/
+/output_data
