@@ -5,301 +5,388 @@ import argparse
 import numpy as np
 from ultralytics import YOLO
 import sys
-# --- 設定Python導入路徑，以便找到 court_definition 模組 ---
-# 獲取目前腳本 (track_ball_and_player.py) 所在的目錄 (video_processing/)
+import json
+
+# --- 1. 設定Python導入路徑，以便找到 court_definition 模組 ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
-# 獲取專案根目錄 (beach-volleyball-tracker/)
-project_root = os.path.dirname(current_script_dir)
-# 將專案根目錄添加到 sys.path，這樣Python就能找到其他子目錄中的模組
+project_root = os.path.dirname(current_script_dir) # video_processing/ 的上一層是 project_root
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from court_definition.court_config_generator import define_court_boundaries_manually, load_court_geometry
+# --- 2. 從 court_definition 模組導入必要的函數 ---
+try:
+    # define_court_boundaries_manually 主要由 generator 腳本自身使用
+    # track_ball_and_player 主要需要 load_court_geometry
+    from court_definition.court_config_generator import load_court_geometry, define_court_boundaries_manually # 保留 define 以便首次設定
+except ImportError as e:
+    print(f"錯誤: 無法導入 court_definition 模組中的函數: {e}")
+    print("請確保 court_definition 資料夾和其中的 court_config_generator.py 檔案存在，並且路徑設定正確。")
+    print("同時，建議在 court_definition 資料夾中加入一個空的 __init__.py 檔案。")
+    sys.exit(1)
 
+# --- 3. 定義命令行參數 ---
 def parse_args():
-    p = argparse.ArgumentParser(description="同时使用两个模型：排球检测（带运动过滤）和选手检测（仅标出场上4位选手）")
-    p.add_argument("--input",        type=str, required=True,  help="输入视频文件路径")
-    p.add_argument("--output_dir",   type=str, default="output_video", help="输出根目录")
-    p.add_argument("--ball_model",   type=str, default="model/ball_best.pt", help="排球检测模型路径")
-    p.add_argument("--player_model", type=str, default="model/player_yolo.pt", help="选手检测模型路径")
-    p.add_argument("--conf",         type=float, default=0.3,   help="置信度阈值")
-    p.add_argument("--device",       type=str, default="0",     help="推理设备: 'cpu' 或 GPU id")
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description="對沙灘排球影片進行球和球員追蹤分析。")
+    parser.add_argument("--input", type=str, required=True, help="輸入的短影片片段路徑")
+    parser.add_argument("--output_dir", type=str, default="output_data/tracking_output", 
+                        help="追蹤結果的輸出根目錄 (相對於專案根目錄)")
+    # 模型路徑預設相對於專案根目錄下的 models/ 資料夾
+    parser.add_argument("--ball_model", type=str, default="model/ball_best.pt", 
+                        help="排球偵測模型路徑 (相對於專案根目錄)")
+    parser.add_argument("--player_model", type=str, default="model/player_yolo.pt", 
+                        help="球員偵測模型路徑 (相對於專案根目錄)")
+    parser.add_argument("--conf", type=float, default=0.3, help="物件偵測的置信度閾值")
+    parser.add_argument("--device", type=str, default="0", help="推理設備: 'cpu' 或 GPU id")
+    parser.add_argument("--save_annotated_video", action='store_true',default=True, help="是否儲存帶有標註的影片")
+    parser.add_argument("--config_file_name", type=str, default="court_config.json", 
+                        help="場地設定檔名稱 (位於專案根目錄)")
+    return parser.parse_args()
 
-
-def init_models(ball_model_path, player_model_path, device):
-    """
-    加载两个模型：ball_model 用于排球检测，player_model 用于选手检测
-    """
-    ball_model   = YOLO(ball_model_path).to(device)
-    player_model = YOLO(player_model_path).to(device)
-    return ball_model, player_model
-
-
+# --- 背景分割器初始化 (與你原有的相同) ---
 def init_bg_subtractor():
-    """
-    初始化 MOG2 背景分割器及形态学内核，用于运动前景提取
-    """
-    fgbg   = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
+    fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
     return fgbg, kernel
 
-
+# --- 球體偵測函數 (與你原有的相同，假設仍使用 fgmask) ---
 def detect_ball(frame, ball_model, fgmask, kernel, conf_thresh):
-    """
-    在单帧图像上检测排球，并做运动过滤。
-    返回 list of tuples: (x1, y1, x2, y2, confidence)
-    """
-    # 推理只保留 class 0 (排球)
-    res_ball = ball_model(frame, conf=conf_thresh, classes=[0])[0]
+    res_ball = ball_model(frame, conf=conf_thresh, classes=[0])[0] # 假設球是 class 0
     ball_boxes = []
     for box in res_ball.boxes:
         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-        # 对应 fgmask 区域
         roi = fgmask[y1:y2, x1:x2]
         if roi.size == 0:
             continue
         motion_ratio = np.count_nonzero(roi) / roi.size
-        if motion_ratio < 0.02:
-            continue  # 过滤静止球
+        if motion_ratio < 0.02: # 運動比例閾值，過濾靜止球
+            continue
         conf_score = float(box.conf[0].cpu().numpy())
         ball_boxes.append((x1, y1, x2, y2, conf_score))
     return ball_boxes
 
-
-def detect_player_by_proximity(frame, player_model, conf_thresh, court_center_x, court_center_y):
-    """
-    偵測畫面中的所有 'person'，並選出離場地中心最近的4位作為球員。
-    不再使用運動過濾。
-    返回 list of tuples: (x1, y1, x2, y2, confidence)
-    """
-    # 推理，假設 'person' 類別的索引是 0 (COCO 模型中的典型值)
-    results = player_model(frame, conf=conf_thresh, classes=[0])[0] 
+# --- 4. 增強版的球員偵測函數 ---
+def detect_players_enhanced(frame, player_model, conf_thresh, 
+                            court_center_xy, 
+                            court_boundary_polygon_np, 
+                            exclusion_zones_np_list):
+    results = player_model(frame, conf=conf_thresh, classes=[0])[0] # 假設 person class is 0
     
-    detected_persons_with_distance = []
+    candidate_persons = []
     for box in results.boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy()) # 將座標轉為整數
+        x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
         confidence = float(box.conf[0].cpu().numpy())
         
-        # 計算偵測到的 person 的中心點
         person_cx = (x1 + x2) / 2
         person_cy = (y1 + y2) / 2
+        person_center_for_test = (float(person_cx), float(person_cy))
+
+        in_exclusion_zone = False
+        if exclusion_zones_np_list: # 檢查是否為 None 或空
+            for zone_poly in exclusion_zones_np_list:
+                if cv2.pointPolygonTest(zone_poly, person_center_for_test, False) >= 0:
+                    in_exclusion_zone = True
+                    break
+        if in_exclusion_zone:
+            continue
+
+        is_inside_court = False
+        # 確保 court_boundary_polygon_np 是有效的 NumPy 陣列且至少有3個點
+        if isinstance(court_boundary_polygon_np, np.ndarray) and court_boundary_polygon_np.ndim == 2 and court_boundary_polygon_np.shape[0] >= 3:
+            is_inside_court = cv2.pointPolygonTest(court_boundary_polygon_np, person_center_for_test, False) >= 0
         
-        # 計算該 person 中心到場地中心的距離
-        distance = np.sqrt((person_cx - court_center_x)**2 + (person_cy - court_center_y)**2)
+        distance_to_court_center = float('inf') 
+        if court_center_xy: # 確保 court_center_xy 不是 None
+            distance_to_court_center = np.sqrt((person_cx - court_center_xy[0])**2 + \
+                                               (person_cy - court_center_xy[1])**2)
         
-        detected_persons_with_distance.append({
+        candidate_persons.append({
             "box_coords": (x1, y1, x2, y2),
             "confidence": confidence,
-            "distance_to_center": distance
+            "is_inside_court": is_inside_court,
+            "distance_to_center": distance_to_court_center,
+            "center_point": (person_cx, person_cy) # 保留以備調試或後續使用
         })
         
-    # 根據到場地中心的距離進行排序 (由近到遠)
-    sorted_persons = sorted(detected_persons_with_distance, key=lambda p: p["distance_to_center"])
+    def sort_key_for_player_selection(person):
+        priority_inside = 0 if person["is_inside_court"] else 1
+        return (priority_inside, person["distance_to_center"])
+
+    sorted_persons = sorted(candidate_persons, key=sort_key_for_player_selection)
+    selected_players_data = sorted_persons[:4] # 選取最多4位
     
-    # 選取距離最近的4位
-    top_4_players_data = sorted_persons[:4]
-    
-    # 準備回傳結果，格式與原來的 detect_player 保持一致
     output_player_boxes = []
-    for player_data in top_4_players_data:
+    for player_data in selected_players_data:
+        # 返回的格式與原來的 detect_player 保持一致，方便 draw_and_save
+        # 但如果 all_frames_data 需要更多資訊，這裡可以返回 player_data (字典)
         output_player_boxes.append((*player_data["box_coords"], player_data["confidence"]))
         
-    return output_player_boxes
+    return output_player_boxes, selected_players_data # 同時返回詳細數據用於 all_frames_data
 
-# 你可以選擇保留舊的 detect_player 函數並將新的命名為 detect_player_by_proximity，
-# 或者直接用新邏輯覆蓋舊的 detect_player 函數。
-# 如果覆蓋，記得更新 main 函數中的調用。為了清楚，這裡我們用新名字。
-
-
-def draw_and_save(frame, ball_boxes, player_boxes, w, h, frame_idx, frame_dir, label_dir):
-    """
-    在图像上绘制两个通道的框，并保存帧图与对应的 YOLO 格式标签文件
-    """
-    # 保存原始帧
-    frame_path = os.path.join(frame_dir, f"frame_{frame_idx:06d}.jpg")
-    cv2.imwrite(frame_path, frame)
-
+# --- 繪製與儲存標籤 (與你原有的 draw_and_save 類似，但幀的保存移到主迴圈) ---
+def draw_boxes_and_get_labels(frame_to_draw, ball_boxes, player_boxes, w, h):
     txt_lines = []
-    # 绘制排球 (class 0)
+    # 繪製排球 (class 0, 藍色)
     for (x1, y1, x2, y2, conf) in ball_boxes:
         cx = ((x1 + x2) / 2) / w
         cy = ((y1 + y2) / 2) / h
         bw = (x2 - x1) / w
         bh = (y2 - y1) / h
-        txt_lines.append(f"0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-        cv2.putText(frame, f"ball {conf:.2f}", (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        txt_lines.append(f"0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}") # 球標籤為0
+        cv2.rectangle(frame_to_draw, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        cv2.putText(frame_to_draw, f"Ball {conf:.2f}", (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
 
-    # 绘制选手 (class 1)
-    for (x1, y1, x2, y2, conf) in player_boxes:
+    # 繪製選手 (class 1, 黃色)
+    for (x1, y1, x2, y2, conf) in player_boxes: # player_boxes 現在是 (x1,y1,x2,y2,conf) 格式
         cx = ((x1 + x2) / 2) / w
         cy = ((y1 + y2) / 2) / h
         bw = (x2 - x1) / w
         bh = (y2 - y1) / h
-        txt_lines.append(f"1 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"player {conf:.2f}", (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        txt_lines.append(f"1 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}") # 球員標籤為1
+        cv2.rectangle(frame_to_draw, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        cv2.putText(frame_to_draw, f"Player {conf:.2f}", (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    return txt_lines
 
-    # 保存标签
-    label_path = os.path.join(label_dir, f"frame_{frame_idx:06d}.txt")
-    with open(label_path, 'w') as f:
-        f.write("\n".join(txt_lines))
-
-
+# --- 5. 主函數 ---
 def main():
     args = parse_args()
 
+    # --- 載入和處理場地幾何設定 ---
+    config_file_path = os.path.join(project_root, args.config_file_name) 
 
-    config_file_path = os.path.join(project_root, "court_config.json") 
-
-
-     # 檢查設定檔是否存在，如果不存在，或使用者選擇重新定義，則運行定義程序
     if not os.path.exists(config_file_path):
-        print(f"場地設定檔 '{config_file_path}' 不存在。")
-        print("現在將啟動首次場地邊界定義程序...")
-        if not define_court_boundaries_manually(args.input, config_file_path):
-            print("場地邊界定義未完成或已取消。程式無法繼續。")
-            return # 結束程式
+        print(f"警告：場地設定檔 '{os.path.abspath(config_file_path)}' 不存在。")
+        # 為了讓 track_ball_and_player 更專注於分析，建議在此不調用 define_court_boundaries_manually
+        # 而是提示用戶先運行 court_config_generator.py
+        print(f"請先從專案根目錄執行: python court_definition/court_config_generator.py <用於定義的範例影片路徑>")
+        print("來生成 court_config.json 檔案。")
+        print("如果希望在沒有場地設定的情況下繼續 (僅進行基礎偵測)，請手動創建一個空的 court_config.json 或修改程式碼。")
+        # return # 可以選擇終止，或者允許在沒有場地資訊的情況下運行（但功能會受限）
+        court_geometry = {} # 允許在沒有設定檔的情況下繼續，但功能會受限
     else:
-        # 如果設定檔已存在，可以詢問使用者是否要重新定義
-        user_choice = input(f"場地設定檔 '{config_file_path}' 已存在。是否要重新定義場地邊界? (y/N): ").strip().lower()
-        if user_choice == 'y':
-            print("重新定義場地邊界...")
-            if not define_court_boundaries_manually(args.input, config_file_path):
-                print("場地邊界定義未完成或已取消。將嘗試使用現有設定檔。")
+        court_geometry = load_court_geometry(config_load_path=config_file_path)
+        if court_geometry is None: # load_court_geometry 可能因格式錯誤返回 None
+            print(f"錯誤：無法從 '{os.path.abspath(config_file_path)}' 正確載入場地幾何資訊。")
+            court_geometry = {} # 設為空字典以避免後續 NoneType 錯誤，但功能受限
         else:
-            print(f"將使用現有的場地設定檔: {config_file_path}")
-
-
-       # 載入場地幾何資訊
-    court_geometry = load_court_geometry(config_file_path)
-    if court_geometry is None:
-        print("無法載入場地幾何資訊。請確保已正確定義或設定檔無誤。程式終止。")
-        return
+            print(f"成功載入場地資訊。")
     
-      # --- 新增：計算場地中心點 ---
-    court_center_x, court_center_y = None, None
-    if "court_boundary_polygon" in court_geometry and \
-       isinstance(court_geometry["court_boundary_polygon"], list) and \
-       len(court_geometry["court_boundary_polygon"]) == 4: # 假設是4個點定義的邊界
-        
+    # --- 準備幾何資訊給偵測函數 ---
+    court_center_xy_tuple = None
+    court_boundary_poly_np = None
+    exclusion_zones_np_list = []
+
+    if "court_boundary_polygon" in court_geometry and court_geometry["court_boundary_polygon"]:
         points = court_geometry["court_boundary_polygon"]
-        # 計算多邊形 (這裡假設為四邊形) 的幾何中心 (質心)
-        # 對於凸四邊形，頂點平均值是一個合理的近似
-        court_center_x = sum(p[0] for p in points) / len(points)
-        court_center_y = sum(p[1] for p in points) / len(points)
-        print(f"計算得到的場地中心點: ({court_center_x:.2f}, {court_center_y:.2f})")
-    else:
-        print("錯誤：'court_boundary_polygon' 未在設定檔中正確定義或不是4個點。")
-        # 可以選擇終止程式，或使用影像中心作為備用方案（但不推薦用於精確判斷）
-        # 獲取影像寬高 (w, h) 後，可用 w/2, h/2
-        # 此處選擇終止，因為場地中心對此功能很重要
-        print("程式因無法確定場地中心而終止。")
+        if isinstance(points, list) and len(points) >= 3:
+            court_boundary_poly_np = np.array(points, dtype=np.int32)
+            try:
+                M = cv2.moments(court_boundary_poly_np)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    court_center_xy_tuple = (cx, cy)
+                elif points: 
+                    cx = sum(p[0] for p in points) / len(points)
+                    cy = sum(p[1] for p in points) / len(points)
+                    court_center_xy_tuple = (cx, cy)
+                if court_center_xy_tuple: print(f"計算得到的場地中心: ({court_center_xy_tuple[0]:.0f}, {court_center_xy_tuple[1]:.0f})")
+            except Exception as e:
+                print(f"計算場地中心時出錯: {e}.")
+                if points and len(points) > 0:
+                    cx = sum(p[0] for p in points) / len(points)
+                    cy = sum(p[1] for p in points) / len(points)
+                    court_center_xy_tuple = (cx, cy)
+                    if court_center_xy_tuple: print(f"備用場地中心 (平均值): ({court_center_xy_tuple[0]:.0f}, {court_center_xy_tuple[1]:.0f})")
+        else: print("警告: 'court_boundary_polygon' 無效。")
+    else: print("警告: 未定義 'court_boundary_polygon'。")
+
+    loaded_exclusion_zones = court_geometry.get("exclusion_zones", [])
+    if isinstance(loaded_exclusion_zones, list):
+        for zone_points in loaded_exclusion_zones:
+            if isinstance(zone_points, list) and len(zone_points) >= 3:
+                exclusion_zones_np_list.append(np.array(zone_points, dtype=np.int32))
+        if exclusion_zones_np_list: print(f"載入了 {len(exclusion_zones_np_list)} 個排除區域。")
+    elif loaded_exclusion_zones: print("警告: 'exclusion_zones' 格式不正確，應為列表的列表。")
+    
+    # --- 初始化模型 ---
+    device_to_use = f"cuda:{args.device}" if args.device.isdigit() else args.device
+    # 將模型路徑與專案根目錄結合，確保能正確找到
+    abs_ball_model_path = os.path.join(project_root, args.ball_model)
+    abs_player_model_path = os.path.join(project_root, args.player_model)
+    try:
+        print(f"正在加載球體模型: {abs_ball_model_path} 到設備 {device_to_use}")
+        ball_model = YOLO(abs_ball_model_path).to(device_to_use)
+        print(f"正在加載球員模型: {abs_player_model_path} 到設備 {device_to_use}")
+        player_model = YOLO(abs_player_model_path).to(device_to_use)
+        print("模型加載成功。")
+    except Exception as e:
+        print(f"錯誤: 加載YOLO模型失敗: {e}")
         return
-    # --- 場地中心點計算結束 ---
 
-    print(f"成功載入場地資訊: {court_geometry}")
-    # --- 場地定義與載入結束 ---
+    # --- 修改：創建輸出目錄，使其直接使用影片名稱 ---
+    video_name_base = os.path.splitext(os.path.basename(args.input))[0] 
+    
+    # 確保 args.output_dir (例如 "output_data/tracking_output") 是相對於專案根目錄的
+    # 而 specific_output_dir 將是 args.output_dir 下以影片名命名的子資料夾
+    base_output_folder_for_tracking = os.path.join(project_root, args.output_dir)
+    specific_video_output_dir = os.path.join(base_output_folder_for_tracking, video_name_base)
+    
+    os.makedirs(specific_video_output_dir, exist_ok=True) # 創建以影片名為基礎的資料夾
+    print(f"所有輸出將儲存到: {specific_video_output_dir}")
+
+    # (可選) 如果你仍然需要 frames 和 labels 子目錄，在這裡創建它們
+    # frames_output_sub_dir = os.path.join(specific_video_output_dir, "frames")
+    # labels_output_sub_dir = os.path.join(specific_video_output_dir, "labels")
+    # os.makedirs(frames_output_sub_dir, exist_ok=True)
+    # os.makedirs(labels_output_sub_dir, exist_ok=True)
+
+    annotated_video_path = None
+    if args.save_annotated_video:
+        # 標註影片直接存在 specific_video_output_dir 下
+        annotated_video_path = os.path.join(specific_video_output_dir, f"{video_name_base}_annotated.mp4")
+    # --- 輸出目錄修改結束 ---
 
 
-    # 创建输出目录结构
-    base     = os.path.splitext(os.path.basename(args.input))[0]
-    out_root = os.path.join(args.output_dir, base)
-    os.makedirs(out_root, exist_ok=True)
-    frame_dir = os.path.join(out_root, "frames")
-    label_dir = os.path.join(out_root, "labels")
-    os.makedirs(frame_dir, exist_ok=True)
-    os.makedirs(label_dir, exist_ok=True)
-
-    # 设备选择
-    device = args.device
-    if device.isdigit():
-        device = f"cuda:{device}"
-
-    # 加载两个模型
-    ball_model, player_model = init_models(args.ball_model, args.player_model, device)
-
-    # 打开视频并获取参数
+    # --- 處理影片 ---
     cap = cv2.VideoCapture(args.input)
     if not cap.isOpened():
-        raise RuntimeError(f"无法打开视频: {args.input}")
+        print(f"錯誤: 無法打開輸入影片 {args.input}")
+        return
+    
     fps = cap.get(cv2.CAP_PROP_FPS)
-    w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # 输出视频 writer
-    out_vid = os.path.join(out_root, f"{base}_output.avi")
-    fourcc  = cv2.VideoWriter_fourcc(*'mp4v')
-    writer  = cv2.VideoWriter(out_vid, fourcc, fps, (w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f"无法打开输出视频: {out_vid}")
+    out_writer = None
+    if args.save_annotated_video and annotated_video_path:
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out_writer = cv2.VideoWriter(annotated_video_path, fourcc, fps, (frame_w, frame_h))
+        print(f"將儲存標註影片到: {annotated_video_path}")
 
-    # 初始化背景分割器（用于排球检测的运动过滤）
-    fgbg, kernel = init_bg_subtractor()
-
-    frame_idx = 0
-    all_frames_data =[]# <--- 新增：用於儲存所有幀的資訊
+    fgbg, kernel = init_bg_subtractor() # 初始化背景分割器 (如果 detect_ball 需要)
+    all_frames_data = []
+    frame_count = 0
+    print(f"\n開始處理影片: {args.input}")
 
     while True:
-        ret, frame = cap.read()
+        ret, frame_orig = cap.read()
         if not ret:
             break
+        
+        frame_count += 1
+        frame_to_draw_on = frame_orig.copy() # 用於繪製的副本
 
-        # 1) 运动前景分割
-        fgmask = fgbg.apply(frame)
+        # 1) 運動前景分割 (如果 detect_ball 需要)
+        fgmask = fgbg.apply(frame_orig)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel)
 
-        # 2) 排球检测并做运动过滤
-        ball_boxes = detect_ball(frame, ball_model, fgmask, kernel, args.conf)
- 
-        # 3) 选手检测，仅保留置信度最高的4个
-        player_boxes = detect_player_by_proximity(frame, player_model, args.conf, court_center_x, court_center_y)
-
-
-                # <--- 新增：儲存當前幀的球和球員資訊 --->
+        # 2) 排球检测 (假設它仍使用 fgmask)
+        ball_boxes = detect_ball(frame_orig, ball_model, fgmask, kernel, args.conf)
+        
+        # 3) 選手检测 (使用增強版函數)
+        player_boxes_simple, player_boxes_detailed = detect_players_enhanced( # 修改為接收兩個返回值
+            frame_orig, player_model, args.conf,
+            court_center_xy_tuple,
+            court_boundary_poly_np,
+            exclusion_zones_np_list
+        )
+        
+        # 4) 儲存數據到 all_frames_data
         current_frame_info = {
-            "frame_id": frame_idx,
-            "ball_detections": [], # 儲存球的中心點或邊界框
-            "player_detections": [] # 儲存球員的中心點或邊界框
+            "frame_id": frame_count,
+            "ball_detections": [], 
+            "player_detections": [] 
         }
-
-        # 處理球的資訊 (範例：儲存球的中心點)
-        if ball_boxes:
-            for (x1, y1, x2, y2, conf) in ball_boxes:
-                ball_center_x = (x1 + x2) / 2
-                ball_center_y = (y1 + y2) / 2
-                current_frame_info["ball_detections"].append({
-                    "center_x": ball_center_x,
-                    "center_y": ball_center_y,
-                    "confidence": conf
-                    # 你也可以儲存原始的 x1, y1, x2, y2
-                })
-        
-        # 處理球員的資訊 (範例：儲存球員的邊界框)
-        if player_boxes:
-            for (x1, y1, x2, y2, conf) in player_boxes:
-                current_frame_info["player_detections"].append({
-                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                    "confidence": conf
-                })
-        
+        for (x1,y1,x2,y2,conf) in ball_boxes:
+            current_frame_info["ball_detections"].append({
+                "center_x": (x1+x2)/2, "center_y": (y1+y2)/2, 
+                "confidence": round(conf, 4), "box": [x1,y1,x2,y2]
+            })
+        # 使用 player_boxes_detailed 來儲存更豐富的球員資訊
+        for p_data in player_boxes_detailed:
+            current_frame_info["player_detections"].append({
+                "box_coords": p_data["box_coords"], 
+                "confidence": round(p_data["confidence"], 4),
+                "is_inside_court": p_data["is_inside_court"],
+                "distance_to_center": round(p_data["distance_to_center"], 2) if p_data["distance_to_center"] != float('inf') else None,
+                "center_point": (round(p_data["center_point"][0], 2), round(p_data["center_point"][1], 2) )
+            })
         all_frames_data.append(current_frame_info)
-        # <--- 資訊儲存結束 --->
 
+        # --- 繪製與儲存標籤和幀 (如果需要) ---
+        # 如果你仍然需要單獨的 frames/ 和 labels/ 子目錄用於YOLO格式數據集：
+        # raw_frame_path = os.path.join(frames_output_sub_dir, f"frame_{frame_count:06d}.jpg")
+        # cv2.imwrite(raw_frame_path, frame_orig)
+        # yolo_labels = draw_boxes_and_get_labels(frame_to_draw_on, ball_boxes, player_boxes_simple, frame_w, frame_h)
+        # label_path = os.path.join(labels_output_sub_dir, f"frame_{frame_count:06d}.txt")
+        # with open(label_path, 'w') as f:
+        #     f.write("\n".join(yolo_labels))
+        
+        # 否則，如果只需要標註影片，上面的繪製邏輯可以簡化或放在 if args.save_annotated_video 內部
+        if args.save_annotated_video:
+            # 繪製球和球員 (這個繪製邏輯可以來自 draw_boxes_and_get_labels，或者直接在這裡寫)
+            # 為了簡潔，我們假設 draw_boxes_and_get_labels 只返回標籤，繪製在這裡完成
+            if court_boundary_poly_np is not None:
+                cv2.polylines(frame_to_draw_on, [court_boundary_poly_np], True, (0,255,0), 1)
+            for ex_zone in exclusion_zones_np_list:
+                cv2.polylines(frame_to_draw_on, [ex_zone], True, (255,0,255), 1)
 
-        # 4) 绘制、保存帧与标签
-        draw_and_save(frame, ball_boxes, player_boxes, w, h, frame_idx, frame_dir, label_dir)
+            for (x1,y1,x2,y2,conf) in ball_boxes:
+                cv2.rectangle(frame_to_draw_on, (x1,y1), (x2,y2), (255,0,0), 2)
+                cv2.putText(frame_to_draw_on, f"B {conf:.2f}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
+            for (x1,y1,x2,y2,conf) in player_boxes_simple: # 使用 player_boxes_simple 進行繪製
+                cv2.rectangle(frame_to_draw_on, (x1,y1), (x2,y2), (0,255,255), 2)
+                cv2.putText(frame_to_draw_on, f"P {conf:.2f}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
+            
+            if out_writer:
+                out_writer.write(frame_to_draw_on)
+        
+        if frame_count % int(fps if fps > 0 else 30) == 0:
+            print(f"  已處理 {frame_count} 幀...")
 
-        # 5) 写入输出视频
-        writer.write(frame)
-        frame_idx += 1
+    # --- 迴圈結束後 ---
 
     cap.release()
-    writer.release()
-    print(f"Finished! 结果保存在: {out_root}")
+    if out_writer: 
+        out_writer.release()
+        print(f"已儲存標註影片到: {annotated_video_path}")
+    cv2.destroyAllWindows()
+    print(f"影片 '{args.input}' 處理完成。共處理 {frame_count} 幀。")
+    
+    # --- 新增：儲存 all_frames_data 到 specific_video_output_dir ---
+    if all_frames_data:
+        all_frames_data_filename = os.path.join(specific_video_output_dir, f"{video_name_base}_all_frames_data.json")
+        try:
+            with open(all_frames_data_filename, 'w') as f:
+                json.dump(all_frames_data, f, indent=2)
+            print(f"已將 all_frames_data 儲存到: {all_frames_data_filename}")
+        except Exception as e:
+            print(f"儲存 all_frames_data 時發生錯誤: {e}")
+    # -------------------------------------------------------------
+
+
+# --- 新增：儲存 all_frames_data 到 specific_video_output_dir ---
+    if all_frames_data:
+        all_frames_data_filename = os.path.join(specific_video_output_dir, f"{video_name_base}_all_frames_data.json")
+        try:
+            with open(all_frames_data_filename, 'w') as f:
+                json.dump(all_frames_data, f, indent=2) # indent=2 讓JSON檔案更易讀
+            print(f"已將 all_frames_data 儲存到: {all_frames_data_filename}")
+        except Exception as e:
+            print(f"儲存 all_frames_data 時發生錯誤: {e}")
+    # -------------------------------------------------------------
+    
+    print(f"所有幀的偵測數據已收集 (共 {len(all_frames_data)} 條記錄)。")
+
+
+    # --- 後續分析 ---
+    if all_frames_data and court_geometry:
+        print(f"\n開始進行事件分析...")
+        # serve_events = find_serve_events(all_frames_data, court_geometry, fps, frame_w, frame_h)
+        # ...
+    # ...
 
 if __name__ == "__main__":
     main()
