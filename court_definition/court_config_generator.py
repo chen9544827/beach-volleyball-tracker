@@ -276,7 +276,7 @@ if __name__ == '__main__':
     import sys
     if len(sys.argv) > 1:
         video_file_for_test = sys.argv[1]
-        test_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test_court_config_with_exclusion.json") #改名以區分
+        test_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "court_config.json") #改名以區分
         print(f"使用影片 '{video_file_for_test}' 進行場地定義測試...")
         print(f"測試設定將儲存到: {os.path.abspath(test_config_path)}")
         define_court_boundaries_manually(video_file_for_test, test_config_path)
