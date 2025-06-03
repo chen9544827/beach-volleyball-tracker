@@ -161,7 +161,7 @@ cython_debug/
 
 # 影片與輸出結果
 input_video/
-output_data/
+/output_data/
 logs/
 
 # 模型權重與結果
@@ -181,4 +181,5 @@ __pycache__/
 *.avi
 # VSCode 設定（如果你用 VSCode）
 .vscode/
+/output_data
 /output_data
