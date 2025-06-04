@@ -58,7 +58,7 @@ def run_all_tests():
     print("--- 開始 event_analyzer.py 函數測試 ---")
 
     # --- 測試參數設定 ---
-    video_name_for_data = "segment_170"  # <<--- ★★★ 修改為你生成 _all_frames_data.json 的影片基本名 ★★★
+    video_name_for_data = "123"  # <<--- ★★★ 修改為你生成 _all_frames_data.json 的影片基本名 ★★★
     config_file_name = "court_config.json"
     
     # 影片基本資訊 (必須與生成 _all_frames_data.json 的影片一致)
