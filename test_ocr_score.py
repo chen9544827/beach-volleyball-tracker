@@ -1,6 +1,7 @@
 import cv2
 import pytesseract
 import re
+import numpy as np
 
 # --- 設定 ---
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -8,11 +9,11 @@ import re
 # !! 請根據你的影像，重新精確定義這兩個只包含單個分數數字的ROI !!
 # 範例值 (你需要根據 image_741f77.png 或 image_750832.jpg 實際調整)
 # 假設 Team1 是上面的分數 (GER), Team2 是下面的分數 (CAN)
-SCORE_ROI_TEAM1 = (280, 29, 59, 55)  # 估計的上半部分ROI (x, y, width, height_half)
-SCORE_ROI_TEAM2 = (287, 92, 59, 55) # 估計的下半部分ROI (x, y + height_half, width, height_half)
+SCORE_ROI_TEAM1 = (280, 29, 59, 51)  # 估計的上半部分ROI (x, y, width, height_half)
+SCORE_ROI_TEAM2 = (287, 92, 59, 50) # 估計的下半部分ROI (x, y + height_half, width, height_half)
                                        # 這些值你需要非常精確地從影像中量測和調整！
 
-IMAGE_PATH = 'D:/Github/beach-volleyball-tracker/output_video/test1/frames/frame_000000.jpg' # 或者用你最新的截圖
+IMAGE_PATH = 'D:/Github/beach-volleyball-tracker/output_data/tracking_output/segment_004/frames/frame_000001.jpg' # 或者用你最新的截圖
 
 # OCR 設定：強制只辨識數字，並嘗試更適合單個數字的 psm 模式
 # --psm 7: Treat the image as a single text line.
@@ -25,21 +26,28 @@ def preprocess_image_for_ocr_single_score(image_roi, window_title="Preprocessed 
     """對單個分數的ROI進行預處理"""
     gray = cv2.cvtColor(image_roi, cv2.COLOR_BGR2GRAY)
 
-    scale_factor = 3.0 
+    scale_factor = 2.5 
     width = int(gray.shape[1] * scale_factor)
     height = int(gray.shape[0] * scale_factor)
     resized = cv2.resize(gray, (width, height), interpolation=cv2.INTER_CUBIC)
+    resized_gray = cv2.resize(gray, (width, height), interpolation=cv2.INTER_CUBIC)
+    blurred_gray = cv2.GaussianBlur(resized_gray, (3, 3), 0) # 核心大小(3,3)或(5,5)，標準差為0
 
     # 調整二值化閾值，目標是讓數字清晰且完整
-    _, thresh_img = cv2.threshold(resized, 190, 255, cv2.THRESH_BINARY_INV) # 嘗試不同的閾值 150, 160, 170...
+    _, thresh_img = cv2.threshold(resized, 195, 255, cv2.THRESH_BINARY_INV) # 嘗試不同的閾值 150, 160, 170...
     # 或者自適應閾值
     # thresh_img = cv2.adaptiveThreshold(resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, \
     #                                      cv2.THRESH_BINARY_INV, blockSize=15, C=7)
 
 
     # (可選) 形態學操作，例如輕微的膨脹來連接斷裂的筆劃
-    # kernel = np.ones((2,2),np.uint8)
-    # thresh_img = cv2.dilate(thresh_img, kernel, iterations = 1)
+    kernel = np.ones((2,2),np.uint8)
+    opened_img = cv2.morphologyEx(thresh_img, cv2.MORPH_OPEN, kernel)
+    thresh_img = opened_img # 更新 thresh_img
+
+    kernel = np.ones((2,2),np.uint8)
+    closed_img = cv2.morphologyEx(thresh_img, cv2.MORPH_CLOSE, kernel)
+    thresh_img = closed_img
 
     cv2.imshow(window_title, thresh_img)
     # cv2.waitKey(0) # 在調試時取消註解以逐個查看
