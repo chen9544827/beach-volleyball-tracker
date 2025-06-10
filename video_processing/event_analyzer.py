@@ -1,31 +1,18 @@
 # video_processing/event_analyzer.py
-import cv2
+import os
+import json
 import numpy as np
-import json # 如果將來這些函數內部需要處理JSON，雖然目前主要由調用方處理
+import cv2
+from serve_pose_analyzer import ServePoseAnalyzer
+import argparse
 
 # --- 輔助函數 ---
-def get_player_center(player_box_input): # 將參數名改為 player_box_input 更清晰
-    """
-    計算邊界框的中心點。
-    player_box_input: 一個包含至少四個數值 (x1, y1, x2, y2) 的列表或元組。
-                      額外的元素（如信心度）將被忽略。
-    """
-    if not player_box_input or len(player_box_input) < 4:
-        # print("警告 (get_player_center): 輸入的 player_box_input 無效或長度不足4。")
-        return None, None 
-    
-    # 只取前四個元素作為座標
-    coords = player_box_input[:4]
-    
-    try:
-        # 將座標轉換為浮點數以便計算
-        x1, y1, x2, y2 = map(float, coords)
-    except ValueError:
-        # print("警告 (get_player_center): Box 座標無法轉換為浮點數。")
-        return None, None
-        
-    return (x1 + x2) / 2, (y1 + y2) / 2
-    
+def get_player_center(bbox):
+    """計算球員邊界框的中心點"""
+    if not bbox or len(bbox) < 4:
+        return None
+    x1, y1, x2, y2 = bbox
+    return ((x1 + x2) / 2, (y1 + y2) / 2)
 
 def get_baselines_from_ordered_corners(court_polygon_points):
     if court_polygon_points is None or len(court_polygon_points) != 4:
@@ -102,136 +89,232 @@ def is_player_behind_baseline(player_center, court_polygon_points, frame_height,
     return False
 
 # --- 主要分析函數 ---
-def find_serve_events(all_frames_data, court_geometry, fps, frame_w, frame_h):
+def find_serve_events(frame_data, court_config, pose_analyzer=None):
+    """分析發球事件 - 簡化版"""
     serve_events = []
-    if not court_geometry or "court_boundary_polygon" not in court_geometry:
-        print("錯誤: find_serve_events - 未提供有效的場地邊界定義。")
-        return serve_events
-
-    court_polygon = court_geometry["court_boundary_polygon"]
-    if not isinstance(court_polygon, list) or len(court_polygon) != 4:
-        print("錯誤: find_serve_events - court_boundary_polygon 無效 (需要4個點的列表)。")
-        return serve_events
-
-    court_center_approx = None
-    try:
-        poly_np = np.array(court_polygon, dtype=np.int32)
-        M = cv2.moments(poly_np)
-        if M["m00"] != 0:
-            court_center_approx = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-        elif court_polygon: 
-            court_center_approx = (
-                int(sum(p[0] for p in court_polygon) / len(court_polygon)),
-                int(sum(p[1] for p in court_polygon) / len(court_polygon))
-            )
-    except Exception as e:
-        print(f"警告 (find_serve_events): 計算場地中心時出錯: {e}")
-
-    # --- 參數設定 ---
-    BALL_MIN_SPEED_START_SQ = 10**2 
-    PLAYER_BALL_PROXIMITY_THRESH = 70
-    MIN_FRAMES_FOR_SERVE_SETUP = int(fps * 0.3) 
-    MIN_BALL_FLIGHT_FRAMES_AFTER_SERVE = int(fps * 0.2)
-    SERVE_COOLDOWN_FRAMES = int(fps * 3)
-    last_serve_frame_idx = -SERVE_COOLDOWN_FRAMES 
-
-    potential_server_info = None 
+    ball_trajectory = []
+    first_serve_found = False
     
-    for i in range(len(all_frames_data)):
-        current_frame_data = all_frames_data[i]
-        frame_idx = current_frame_data["frame_id"]
-
-        if frame_idx < last_serve_frame_idx + SERVE_COOLDOWN_FRAMES:
-            potential_server_info = None 
-            continue
-
-        current_ball_infos = current_frame_data.get("ball_detections", [])
-        current_player_infos = current_frame_data.get("player_detections", [])
-
-        found_potential_this_frame = False
-        if not current_player_infos:
-            if potential_server_info and frame_idx > potential_server_info.get('last_seen_frame_idx', frame_idx) + int(fps*0.2):
-                 potential_server_info = None
-            continue
-
-        for p_info_dict in current_player_infos:
-            player_box_for_center_calc = p_info_dict.get("box_coords")
-            if not player_box_for_center_calc or len(player_box_for_center_calc) < 4:
-                continue
-            # get_player_center 期望的是一個至少包含4個座標的序列
-            player_center_x, player_center_y = get_player_center(player_box_for_center_calc) 
-            if player_center_x is None: continue
-
-            player_center = (player_center_x, player_center_y)
-
-            if is_player_behind_baseline(player_center, court_polygon, frame_h, frame_w, court_center_approx):
-                ball_is_near_this_player = False
-                if current_ball_infos:
-                    ball_info = current_ball_infos[0] 
-                    dist_player_ball = np.sqrt((player_center[0] - ball_info["center_x"])**2 + \
-                                               (player_center[1] - ball_info["center_y"])**2)
-                    if dist_player_ball < PLAYER_BALL_PROXIMITY_THRESH:
-                        ball_is_near_this_player = True
-                
-                if ball_is_near_this_player:
-                    found_potential_this_frame = True
-                    if potential_server_info and \
-                       potential_server_info.get('player_box_coords') == p_info_dict["box_coords"]:
-                        potential_server_info['ball_nearby_frames'] += 1
-                        potential_server_info['last_seen_frame_idx'] = frame_idx
-                    else:
-                        potential_server_info = {
-                            'player_info_dict': p_info_dict,
-                            'player_box_coords': p_info_dict["box_coords"], 
-                            'player_center': player_center,
-                            'frame_idx_setup_start': frame_idx, 
-                            'ball_nearby_frames': 1,
-                            'last_seen_frame_idx': frame_idx
-                        }
-                    break 
-        
-        if not found_potential_this_frame and potential_server_info:
-            if frame_idx > potential_server_info.get('last_seen_frame_idx', frame_idx) + int(fps*0.2): # 0.2秒內沒再滿足就清除
-                potential_server_info = None
-        
-        if potential_server_info and \
-           potential_server_info['ball_nearby_frames'] >= MIN_FRAMES_FOR_SERVE_SETUP:
-            if i + 1 < len(all_frames_data):
-                next_frame_data = all_frames_data[i+1]
-                next_ball_infos = next_frame_data.get("ball_detections", [])
-
-                if current_ball_infos and next_ball_infos:
-                    current_ball_of_interest_info = current_ball_infos[0] 
-                    next_ball_of_interest_info = next_ball_infos[0]     
-                    cb_pos = (current_ball_of_interest_info["center_x"], current_ball_of_interest_info["center_y"])
-                    nb_pos = (next_ball_of_interest_info["center_x"], next_ball_of_interest_info["center_y"])
-                    ball_speed_sq = (nb_pos[0] - cb_pos[0])**2 + (nb_pos[1] - cb_pos[1])**2
-                    
-                    if ball_speed_sq > BALL_MIN_SPEED_START_SQ:
-                        dist_server_ball_start = np.sqrt(
-                            (potential_server_info['player_center'][0] - cb_pos[0])**2 + \
-                            (potential_server_info['player_center'][1] - cb_pos[1])**2)
-
-                        if dist_server_ball_start < PLAYER_BALL_PROXIMITY_THRESH:
-                            ball_flies_consistently = True
-                            if i + MIN_BALL_FLIGHT_FRAMES_AFTER_SERVE < len(all_frames_data):
-                                for k_fly in range(1, MIN_BALL_FLIGHT_FRAMES_AFTER_SERVE + 1):
-                                    future_frame_data = all_frames_data[i+k_fly]
-                                    if not future_frame_data.get("ball_detections", []):
-                                        ball_flies_consistently = False; break
-                            else:
-                                ball_flies_consistently = False 
-
-                            if ball_flies_consistently:
-                                serve_event_data = {
-                                    "serve_frame_idx": frame_idx, 
-                                    "serving_player_info": potential_server_info['player_info_dict'],
-                                    "ball_start_position": cb_pos,
-                                    "ball_initial_motion_vector": (nb_pos[0] - cb_pos[0], nb_pos[1] - cb_pos[1])
-                                }
-                                serve_events.append(serve_event_data)
-                                print(f"** 偵測到發球事件! 影格: {frame_idx}, "
-                                      f"發球員 Box: {potential_server_info['player_info_dict'].get('box_coords')} **")
-                                last_serve_frame_idx = frame_idx
-                                potential_server_info = None 
+    print(f"開始分析 {len(frame_data)} 幀的發球事件...")
+    
+    for frame_idx, frame in enumerate(frame_data):
+        # 檢查是否有球
+        if 'ball_detections' in frame and frame['ball_detections']:
+            ball = frame['ball_detections'][0]
+            ball_y = ball['center_y']
+            
+            # 記錄球的軌跡
+            ball_trajectory.append({
+                'frame': frame_idx,
+                'position': (ball['center_x'], ball['center_y'])
+            })
+            
+            # 如果球在網子上方，且是第一次長時間飛行
+            if ball_y < court_config['net_y'] and not first_serve_found:
+                # 檢查是否為長時間飛行
+                if len(ball_trajectory) > 5:  # 可以調整這個閾值
+                    serve_events.append({
+                        'start_frame': frame_idx,
+                        'end_frame': frame_idx,
+                        'ball_position': (ball['center_x'], ball['center_y']),
+                        'trajectory': ball_trajectory
+                    })
+                    first_serve_found = True
+                    print(f"找到發球事件！發生在第 {frame_idx} 幀")
+                    break
+    
+    print(f"分析完成，共找到 {len(serve_events)} 個發球事件")
     return serve_events
+
+def is_serve(frame_data, net_y):
+    """判斷是否為發球 - 判斷球的垂直和水平移動"""
+    # 檢查是否有球
+    if not frame_data.get('ball_detections'):
+        return False
+    
+    # 取得最可能的球（信心度最高的）
+    ball_detections = frame_data['ball_detections']
+    if not ball_detections:
+        return False
+    
+    ball = max(ball_detections, key=lambda x: x['confidence'])
+    ball_pos = (ball['center_x'], ball['center_y'])
+    
+    # 檢查球的信心度
+    if ball['confidence'] < 0.3:  # 降低信心度要求
+        return False
+    
+    return True
+
+def main():
+    parser = argparse.ArgumentParser(description='分析排球影片中的發球事件')
+    parser.add_argument('--input', required=True, help='輸入的 JSON 檔案路徑')
+    parser.add_argument('--output_dir', required=True, help='輸出目錄')
+    parser.add_argument('--court_config', required=True, help='場地設定檔路徑')
+    parser.add_argument('--fps', type=float, default=25, help='影片的 FPS (預設: 25.0)')
+    args = parser.parse_args()
+
+    # 載入場地設定
+    with open(args.court_config, 'r', encoding='utf-8') as f:
+        court_config = json.load(f)
+    net_y = court_config.get('net_y')
+    if net_y is None:
+        print("錯誤：場地設定檔中缺少 net_y 參數！")
+        return
+
+    # 載入追蹤資料
+    with open(args.input, 'r', encoding='utf-8') as f:
+        tracking_data = json.load(f)
+
+    # 分析發球事件
+    serve_events = []
+    frames = tracking_data  # 直接使用追蹤資料，因為它已經是幀的列表
+    print(f"開始分析 {len(frames)} 幀的發球事件...")
+
+    # 只分析一次發球（自動尋找上拋-最高點-擊球，累積x位移）
+    vertical_threshold = 30  # 垂直移動閾值
+    horizontal_threshold = 50  # 水平移動閾值
+    max_serve_duration = 2.0  # 發球最大持續時間（秒）
+    min_vertical_movement = 100  # 最小垂直移動距離（像素）
+    max_start_y = 200  # 發球開始時的最大y值（像素）
+
+    min_y = None
+    min_y_frame = None
+    min_y_time = None
+    min_y_x = None
+    serve_start_frame = None
+    serve_start_time = None
+    serve_start_x = None
+    serve_start_y = None
+    found_serve = False
+    after_highest_x = None
+    after_highest_time = None
+    last_y = None
+    vertical_movement = False
+    vertical_movement_distance = 0  # 追蹤垂直移動距離
+    for i in range(len(frames)):
+        frame_data = frames[i]
+        if not frame_data.get('ball_detections'):
+            continue
+        ball = max(frame_data['ball_detections'], key=lambda x: x['confidence'])
+        x, y = ball['center_x'], ball['center_y']
+        t = i / args.fps
+        
+        # 輸出9秒附近的球軌跡
+        if 8.5 <= t <= 10.0:
+            if last_y is not None:
+                dy = y - last_y
+                print(f"時間 {t:.2f}秒: 球位置 ({x:.1f}, {y:.1f}), 垂直變化 {dy:.2f}")
+            last_y = y
+            continue
+            
+        if last_y is not None:
+            dy = y - last_y
+            # 檢查是否有明顯垂直上拋（y連續下降）
+            if dy < -vertical_threshold:
+                vertical_movement = True
+                vertical_movement_distance += abs(dy)  # 累積垂直移動距離
+        last_y = y
+        
+        # 檢查發球開始位置
+        if serve_start_frame is None and y > max_start_y:
+            continue
+            
+        if not vertical_movement:
+            continue
+            
+        if serve_start_frame is None:
+            # 找到拋球開始（y開始下降）
+            serve_start_frame = i
+            serve_start_time = t
+            serve_start_x = x
+            serve_start_y = y
+            min_y = y
+            min_y_frame = i
+            min_y_time = t
+            min_y_x = x
+            after_highest_x = None
+            after_highest_time = None
+        else:
+            # 只要y持續下降就更新最高點
+            if y < min_y:
+                min_y = y
+                min_y_frame = i
+                min_y_time = t
+                min_y_x = x
+                after_highest_x = None
+                after_highest_time = None
+            # 一旦y開始上升，進入擊球判斷
+            elif y > min_y + vertical_threshold:
+                # 檢查垂直移動距離是否足夠
+                if vertical_movement_distance < min_vertical_movement:
+                    # 重置狀態，繼續尋找
+                    serve_start_frame = None
+                    serve_start_time = None
+                    serve_start_x = None
+                    serve_start_y = None
+                    min_y = None
+                    min_y_frame = None
+                    min_y_time = None
+                    min_y_x = None
+                    after_highest_x = None
+                    after_highest_time = None
+                    vertical_movement = False
+                    vertical_movement_distance = 0
+                    continue
+                    
+                # 累積x位移
+                if after_highest_x is None:
+                    after_highest_x = x
+                    after_highest_time = t
+                dx_cum = abs(x - min_y_x)
+                duration = t - min_y_time
+                if duration <= max_serve_duration and dx_cum > horizontal_threshold:
+                    print(f"自動判斷發球：")
+                    print(f"  拋球開始：{serve_start_time:.2f}秒 (frame {serve_start_frame}, x={serve_start_x:.1f}, y={serve_start_y:.1f})")
+                    print(f"  最高點：{min_y_time:.2f}秒 (frame {min_y_frame}, x={min_y_x:.1f}, y={min_y:.1f})")
+                    print(f"  擊球：{t:.2f}秒 (frame {i}, x={x:.1f}, y={y:.1f})")
+                    print(f"  最高點到擊球時間：{duration:.2f}秒，水平累積位移：{dx_cum:.1f}像素")
+                    print(f"  垂直移動距離：{vertical_movement_distance:.1f}像素")
+                    serve_events.append({
+                        'start_frame': serve_start_frame,
+                        'start_time': serve_start_time,
+                        'highest_point_frame': min_y_frame,
+                        'highest_point_time': min_y_time,
+                        'highest_point': [min_y_x, min_y],
+                        'hit_frame': i,
+                        'hit_time': t,
+                        'hit_position': [x, y],
+                        'duration': duration,
+                        'horizontal_displacement': dx_cum,
+                        'vertical_movement': vertical_movement_distance
+                    })
+                    found_serve = True
+                    break
+                elif duration > max_serve_duration:
+                    # 超過時間限制，重置
+                    serve_start_frame = None
+                    serve_start_time = None
+                    serve_start_x = None
+                    serve_start_y = None
+                    min_y = None
+                    min_y_frame = None
+                    min_y_time = None
+                    min_y_x = None
+                    after_highest_x = None
+                    after_highest_time = None
+                    vertical_movement = False
+                    vertical_movement_distance = 0
+
+    print(f"分析完成，共找到 {len(serve_events)} 個發球事件")
+
+    # 儲存分析結果
+    output_path = os.path.join(args.output_dir, 'serve_events_analysis.json')
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(serve_events, f, indent=2)
+    print(f"分析完成，結果已保存到：{output_path}")
+    print(f"共檢測到 {len(serve_events)} 個發球事件")
+
+if __name__ == '__main__':
+    main()

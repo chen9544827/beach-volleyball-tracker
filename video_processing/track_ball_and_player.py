@@ -50,17 +50,25 @@ def init_bg_subtractor():
     return fgbg, kernel
 
 # --- 球體偵測函數 (與你原有的相同，假設仍使用 fgmask) ---
-def detect_ball(frame, ball_model, fgmask, kernel, conf_thresh):
-    res_ball = ball_model(frame, conf=conf_thresh, classes=[0])[0] # 假設球是 class 0
+def detect_ball(frame, ball_model, conf_thresh, background_ball_zones=None):
+    res_ball = ball_model(frame, conf=conf_thresh, classes=[0])[0]
     ball_boxes = []
     for box in res_ball.boxes:
         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-        roi = fgmask[y1:y2, x1:x2]
-        if roi.size == 0:
-            continue
-        motion_ratio = np.count_nonzero(roi) / roi.size
-        if motion_ratio < 0.02: # 運動比例閾值，過濾靜止球
-            continue
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        
+        # 檢查是否在背景球過濾區域內
+        if background_ball_zones:
+            in_background_zone = False
+            for zone in background_ball_zones:
+                if (zone["x1"] <= center_x <= zone["x2"] and 
+                    zone["y1"] <= center_y <= zone["y2"]):
+                    in_background_zone = True
+                    break
+            if in_background_zone:
+                continue
+        
         conf_score = float(box.conf[0].cpu().numpy())
         ball_boxes.append((x1, y1, x2, y2, conf_score))
     return ball_boxes
@@ -221,7 +229,12 @@ def main():
 
     # --- 載入和處理場地幾何設定 ---
     config_file_path = os.path.join(project_root, args.config_file_name) 
-
+    background_ball_zones = []
+    if os.path.exists(config_file_path):
+        with open(config_file_path, 'r') as f:
+            court_config = json.load(f)
+            background_ball_zones = court_config.get("background_ball_zones", [])
+    
     if not os.path.exists(config_file_path):
         print(f"警告：場地設定檔 '{os.path.abspath(config_file_path)}' 不存在。")
         # 為了讓 track_ball_and_player 更專注於分析，建議在此不調用 define_court_boundaries_manually
@@ -349,7 +362,7 @@ def main():
              fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel)
 
         # 2) 排球检测 (假設它仍使用 fgmask)
-        ball_boxes = detect_ball(frame_orig, ball_model, fgmask, kernel, args.conf)
+        ball_boxes = detect_ball(frame_orig, ball_model, args.conf, background_ball_zones)
         
         # 3) 選手检测 (使用增強版函數)-
         player_boxes_for_drawing, detailed_player_infos = detect_players_with_pose(

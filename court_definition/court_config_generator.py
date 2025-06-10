@@ -212,7 +212,80 @@ def define_court_boundaries_manually(video_path,
     if exclusion_polygons:
         final_config_data["exclusion_zones"] = exclusion_polygons
         exclusion_polygons_list_pts = exclusion_polygons # 獲取點列表的列表
-    
+
+    # 新增：讓使用者點擊網子位置
+    print("\n--- 步驟 3: 請用滑鼠點擊網子在畫面上的一個位置（建議點網子的中間） ---")
+    net_y = None
+    while net_y is None:
+        temp_img = first_frame_orig.copy()
+        cv2.putText(temp_img, "請點擊網子位置，然後按任意鍵確認", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+        clicked = []
+        def net_click(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                clicked.clear()
+                clicked.append((x, y))
+                cv2.circle(temp_img, (x, y), 8, (255, 0, 0), -1)
+                cv2.imshow("Click Net Position", temp_img)
+        cv2.namedWindow("Click Net Position")
+        cv2.setMouseCallback("Click Net Position", net_click)
+        cv2.imshow("Click Net Position", temp_img)
+        cv2.waitKey(0)
+        cv2.destroyWindow("Click Net Position")
+        if clicked:
+            net_y = clicked[0][1]
+            print(f"你選擇的網子 y 座標為: {net_y}")
+        else:
+            print("請務必點擊一次網子位置！")
+    final_config_data["net_y"] = int(net_y)
+
+    # 在繪製完場地後，詢問是否要設定背景球過濾區域
+    print("\n是否要設定背景球過濾區域？(y/n)")
+    if input().lower() == 'y':
+        print("請點擊背景球區域的左上角和右下角來定義過濾區域")
+        print("按 'n' 繼續設定下一個區域，按 'f' 完成設定")
+        background_ball_zones = []
+        
+        # 重新顯示視窗
+        cv2.namedWindow('Court Definition')
+        cv2.imshow('Court Definition', first_frame_orig)
+        
+        # 設定滑鼠回調
+        points = []
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                points.append((x, y))
+                if len(points) == 2:
+                    x1, y1 = points[0]
+                    x2, y2 = points[1]
+                    background_ball_zones.append({
+                        "x1": min(x1, x2),
+                        "y1": min(y1, y2),
+                        "x2": max(x1, x2),
+                        "y2": max(y1, y2)
+                    })
+                    # 在畫面上標示已設定的區域
+                    cv2.rectangle(first_frame_orig, (min(x1, x2), min(y1, y2)), 
+                                (max(x1, x2), max(y1, y2)), (0, 0, 255), 2)
+                    cv2.imshow('Court Definition', first_frame_orig)
+                    points.clear()
+        
+        cv2.setMouseCallback('Court Definition', mouse_callback)
+        
+        while True:
+            key = cv2.waitKey(0) & 0xFF
+            if key == ord('f'):  # 完成設定
+                break
+            elif key == ord('n'):  # 繼續設定下一個區域
+                points.clear()  # 清除當前點，準備設定下一個區域
+                continue
+        
+        cv2.destroyWindow('Court Definition')
+    else:
+        background_ball_zones = []
+
+    # 儲存設定
+    final_config_data["background_ball_zones"] = background_ball_zones  # 新增背景球過濾區域
+
     if not final_config_data.get("court_boundary_polygon"):
         print("最終配置中缺少場地邊界，不進行儲存。")
         cv2.destroyAllWindows()
