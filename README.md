@@ -1,6 +1,122 @@
 # 沙灘排球分析專案 (Beach Volleyball Tracker)
+本專案旨在利用電腦視覺和深度學習技術，對沙灘排球比賽影片進行分析，實現包括球員追蹤、球體追蹤與路徑分析、發球等事件偵測、以及基於分數變化的影片自動分割等功能。
 
-本專案旨在利用電腦視覺和深度學習技術，對沙灘排球比賽影片進行分析，實現包括球員追蹤、球體追蹤、發球事件偵測、以及基於分數變化的影片自動分割等功能。
+## 主要功能
+
+*   **場地定義**：透過點擊影片畫格，手動定義場地邊界、排除區域、網子位置及背景球過濾區域。設定儲存為 JSON 檔案。
+*   **物件偵測模型微調**：使用 YOLO (yolo11s.pt) 模型，針對排球和球員偵測進行微調。
+*   **發球事件偵測**：分析球的軌跡與球員動作（拋球、最高點、擊球），以識別發球事件。
+*   **球體軌跡分析**：追蹤球的運動路徑並進行分析。
+*   **跳發分析**：針對跳發球進行特定分析 (例如跳躍高度)。
+*   **結果摘要生成**：將分析結果（如跳發事件、軌跡數據）匯總為 CSV 檔案。
+
+## 專案結構
+
+以下為主要資料夾的功能說明：
+
+*   `court_definition/`: 用於定義場地幾何形狀（邊界、排除區、網高等）。
+*   `input_video/`: 用於存放輸入的影片檔案。
+*   `model_training/`: 包含物件偵測模型微調的腳本。
+*   `video_processing/`: 包含核心的影片分析腳本，如事件偵測、球體追蹤等。
+
+## 依賴套件
+
+本專案主要依賴以下 Python 套件 (詳細列表請參考 `requirements.txt`):
+
+*   `roboflow`
+*   `ultralytics`
+*   `opencv-python`
+*   `numpy`
+*   `torch`
+
+## 安裝與使用說明
+
+### 安裝 (Setup)
+
+1.  **複製專案庫** (如果您尚未這樣做):
+    ```bash
+    git clone <專案URL>
+    cd <專案目錄>
+    ```
+2.  **安裝依賴套件**:
+    建議在 Python 虛擬環境中進行安裝。
+    ```bash
+    pip install -r requirements.txt
+    ```
+3.  **準備預訓練模型**:
+    *   本專案的物件偵測模型微調 (`model_training/Fine_tuning.py`) 基於 YOLO 模型 (例如 `yolo11s.pt` 或其他 YOLOv8 預訓練權重)。
+    *   請下載您選擇的預訓練 YOLO 模型權重檔案 (.pt)。
+    *   建議將此檔案放置在專案的根目錄，或 `model_training/` 資料夾中。腳本 `model_training/Fine_tuning.py` 會需要引用此模型路徑。
+4.  **模型微調資料集**:
+    *   若要進行模型微調，請確保您的訓練資料集已依照 `model_training/combined_dataset/data.yaml` 檔案中的路徑和格式進行配置。此 YAML 檔案定義了訓練集、驗證集的圖像位置以及類別等資訊。
+
+### 執行流程 (Execution Workflow)
+
+1.  **定義場地 (`court_config.json`)**:
+    *   執行以下命令，其中 `<影片路徑>` 是您要分析的影片檔案路徑 (或用於定義場地配置的代表性影片):
+        ```bash
+        python court_definition/court_config_generator.py <影片路徑>
+        ```
+    *   此腳本將開啟影片的第一幀，並引導您透過滑鼠點擊來定義以下場地區域：
+        *   場地邊界 (Court boundaries)
+        *   排除區域 (Exclusion zones)
+        *   網子頂部和底部 (Net top and bottom for height calculation)
+        *   背景球過濾區域 (Background ball filter area)
+    *   完成後，相關座標將儲存於專案根目錄下的 `court_config.json` 檔案中。此檔案將被後續的分析腳本使用。
+
+2.  **模型微調 (可選步驟)**:
+    *   如果您需要基於自定義資料集對球和球員的偵測模型進行微調，請執行：
+        ```bash
+        python model_training/Fine_tuning.py
+        ```
+    *   此腳本會：
+        *   讀取 `model_training/combined_dataset/data.yaml` 中設定的資料集。
+        *   使用您在步驟 `安裝 (Setup) - 3` 中準備的預訓練 YOLO 模型作為基礎。
+        *   開始微調訓練，並將新的模型權重儲存在 `runs/train/finetune_ball_player/weights/` 目錄下 (通常會有 `best.pt` 和 `last.pt`)。
+    *   微調完成後，您可以在後續分析步驟中使用新產生的 `best.pt` 模型。
+
+3.  **執行影片分析**:
+    *   影片分析的核心流程通常包含物件追蹤、事件識別和摘要生成。以下為各主要組件的執行方式 (請注意，您可能需要根據實際的腳本整合情況調整執行順序或指令):
+        *   **物件追蹤**:
+            *   使用 `video_processing/` 目錄下的相關腳本 (例如 `track_ball_and_player.py` 或類似功能的腳本) 來處理輸入影片，並產生球和球員的追蹤數據 (通常是 JSON 或 CSV 格式)。此步驟會使用到微調後的模型 (如果進行了步驟2) 和 `court_config.json`。
+            *   *(使用者應根據其具體的追蹤腳本名稱和參數填寫此處的指令)*
+            *   例如: `python video_processing/track_ball_and_player.py --input_video <影片路徑> --output_dir <追蹤輸出目錄> --ball_model <球模型.pt> --player_model <球員模型.pt> --court_config court_config.json`
+        *   **事件分析 (`event_analyzer.py`)**:
+            *   此腳本分析追蹤數據以偵測發球等關鍵事件。
+            *   執行指令範例:
+                ```bash
+                python video_processing/event_analyzer.py --input <追蹤資料.json> --output_dir <事件分析輸出目錄> --court_config court_config.json
+                ```
+            *   `<追蹤資料.json>` 是上一步物件追蹤產生的檔案路徑。
+        *   **摘要生成 (`summary_generator.py`)**:
+            *   此腳本將不同分析模組的結果 (如跳發事件、軌跡數據) 匯總成單一的摘要檔案。
+            *   執行指令範例:
+                ```bash
+                python video_processing/summary_generator.py --jump_serve <跳發事件.json> --trajectory <軌跡分析.json> --output <最終摘要.csv>
+                ```
+            *   `<跳發事件.json>` 和 `<軌跡分析.json>` 分別是事件分析和軌跡分析模組的輸出。
+    *   **重要提示**: 上述指令和腳本名稱可能需要根據您專案的最終結構進行調整。建議提供一個主要的執行腳本或更清晰的端到端執行流程說明。
+
+4.  **查看結果**:
+    *   分析結果通常會儲存在您在執行命令時指定的輸出目錄中。
+    *   結果可能包含：
+        *   詳細的幀級分析數據 (JSON 格式)。
+        *   事件列表 (JSON 或 CSV 格式)。
+        *   最終的比賽摘要報告 (CSV 格式)。
+
+## 如何貢獻
+
+歡迎對此專案做出貢獻！您可以透過以下方式參與：
+
+*   回報問題 (Issues)
+*   提交功能需求 (Feature Requests)
+*   提交拉取請求 (Pull Requests) 進行程式碼改進或錯誤修復。
+
+如果您有任何想法或建議，請隨時提出。
+
+## 授權條款
+
+此專案目前未指定授權條款。請考慮添加一個開源授權條款，例如 MIT License 或 Apache License 2.0。
 
 ## 功能特色
 
