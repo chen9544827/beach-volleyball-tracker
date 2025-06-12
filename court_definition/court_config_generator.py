@@ -212,7 +212,7 @@ def define_court_boundaries_manually(video_path,
     if exclusion_polygons:
         final_config_data["exclusion_zones"] = exclusion_polygons
         exclusion_polygons_list_pts = exclusion_polygons # 獲取點列表的列表
-
+    
     # 新增：讓使用者點擊網子位置
     print("\n--- 步驟 3: 請用滑鼠點擊網子在畫面上的一個位置（建議點網子的中間） ---")
     net_y = None

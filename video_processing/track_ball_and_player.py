@@ -39,7 +39,7 @@ def parse_args():
                         help="球員偵測模型路徑 (相對於專案根目錄)")
     parser.add_argument("--conf", type=float, default=0.3, help="物件偵測的置信度閾值")
     parser.add_argument("--device", type=str, default="0", help="推理設備: 'cpu' 或 GPU id")
-    parser.add_argument("--config_file_name", type=str, default="court_config.json", 
+    parser.add_argument("--config_file_name", type=str, default="court_config.json",
                         help="場地設定檔名稱 (位於專案根目錄)")
     return parser.parse_args()
 
@@ -306,14 +306,14 @@ def main():
         return
 
     # --- 修改：創建輸出目錄，使其直接使用影片名稱 ---
-    video_name_base = os.path.splitext(os.path.basename(args.input))[0] 
-    
+    video_name_base = os.path.splitext(os.path.basename(args.input))[0]
+
     # 確保 args.output_dir (例如 "output_data/tracking_output") 是相對於專案根目錄的
-    # 而 specific_output_dir 將是 args.output_dir 下以影片名命名的子資料夾
+    # specific_video_output_dir 將直接是 args.output_dir
     base_output_folder_for_tracking = os.path.join(project_root, args.output_dir)
     specific_video_output_dir = os.path.join(base_output_folder_for_tracking, video_name_base)
-    
-    os.makedirs(specific_video_output_dir, exist_ok=True) # 創建以影片名為基礎的資料夾
+
+    os.makedirs(specific_video_output_dir, exist_ok=True)  # 創建輸出資料夾
     print(f"所有輸出將儲存到: {specific_video_output_dir}")
 
     # (可選) 如果你仍然需要 frames 和 labels 子目錄，在這裡創建它們
@@ -323,7 +323,6 @@ def main():
     os.makedirs(labels_output_sub_dir, exist_ok=True)
 
     annotated_video_path = None
-       
     annotated_video_path = os.path.join(specific_video_output_dir, f"{video_name_base}_annotated.avi")
     # --- 輸出目錄修改結束 ---
 
@@ -444,6 +443,12 @@ def main():
         # serve_events = find_serve_events(all_frames_data, court_geometry, fps, frame_w, frame_h)
         # ...
     # ...
+
+    # --- 後續分析 ---
+    if all_frames_data and court_geometry:
+        print(f"\n開始進行事件分析...")
+        serve_events = find_serve_events(all_frames_data, court_geometry)
+        print(f"分析完成，共找到 {len(serve_events)} 個發球事件")
 
 if __name__ == "__main__":
     main()

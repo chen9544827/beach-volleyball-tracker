@@ -3,7 +3,6 @@ import os
 import json
 import numpy as np
 import cv2
-from serve_pose_analyzer import ServePoseAnalyzer
 import argparse
 
 # --- 輔助函數 ---
@@ -171,150 +170,195 @@ def main():
     frames = tracking_data  # 直接使用追蹤資料，因為它已經是幀的列表
     print(f"開始分析 {len(frames)} 幀的發球事件...")
 
-    # 只分析一次發球（自動尋找上拋-最高點-擊球，累積x位移）
-    vertical_threshold = 30  # 垂直移動閾值
-    horizontal_threshold = 50  # 水平移動閾值
-    max_serve_duration = 2.0  # 發球最大持續時間（秒）
-    min_vertical_movement = 100  # 最小垂直移動距離（像素）
-    max_start_y = 200  # 發球開始時的最大y值（像素）
-
-    min_y = None
-    min_y_frame = None
-    min_y_time = None
-    min_y_x = None
-    serve_start_frame = None
-    serve_start_time = None
-    serve_start_x = None
-    serve_start_y = None
-    found_serve = False
-    after_highest_x = None
-    after_highest_time = None
+    # 發球檢測參數
+    MIN_RISE_FRAMES = 5    # 最小上升幀數 (拋球階段)
+    MIN_FALL_FRAMES = 3    # 最小下降幀數 (擊球前)
+    MIN_PEAK_HEIGHT = 200  # 最小頂點高度 (像素)
+    MAX_SERVE_DURATION = 2.0 # 最大發球持續時間 (秒)
+    SERVE_AREA_X = [100, 1800] # 發球區域X範圍
+    SERVE_AREA_Y = [300, 700]  # 發球區域Y範圍
+    
+    serve_events = []
+    ball_history = []
+    state = "IDLE"  # 狀態機: IDLE, TOSS, PEAK, HIT
+    
+    # 狀態追蹤變量
+    toss_start_frame = None
+    peak_frame = None
+    hit_frame = None
     last_y = None
-    vertical_movement = False
-    vertical_movement_distance = 0  # 追蹤垂直移動距離
+    upward_count = 0
+    downward_count = 0
+
     for i in range(len(frames)):
         frame_data = frames[i]
+        frame_id = frame_data.get('frame_id', i)
+        
+        # 獲取球位置 (跳過無球幀)
         if not frame_data.get('ball_detections'):
             continue
         ball = max(frame_data['ball_detections'], key=lambda x: x['confidence'])
         x, y = ball['center_x'], ball['center_y']
-        t = i / args.fps
+        ball_history.append({'frame': frame_id, 'x': x, 'y': y})
         
-        # 輸出9秒附近的球軌跡
-        if 8.5 <= t <= 10.0:
+        # 狀態機處理
+        if state == "IDLE":
+            # 檢測拋球開始 (Y連續上升)
             if last_y is not None:
-                dy = y - last_y
-                print(f"時間 {t:.2f}秒: 球位置 ({x:.1f}, {y:.1f}), 垂直變化 {dy:.2f}")
-            last_y = y
-            continue
-            
-        if last_y is not None:
-            dy = y - last_y
-            # 檢查是否有明顯垂直上拋（y連續下降）
-            if dy < -vertical_threshold:
-                vertical_movement = True
-                vertical_movement_distance += abs(dy)  # 累積垂直移動距離
-        last_y = y
-        
-        # 檢查發球開始位置
-        if serve_start_frame is None and y > max_start_y:
-            continue
-            
-        if not vertical_movement:
-            continue
-            
-        if serve_start_frame is None:
-            # 找到拋球開始（y開始下降）
-            serve_start_frame = i
-            serve_start_time = t
-            serve_start_x = x
-            serve_start_y = y
-            min_y = y
-            min_y_frame = i
-            min_y_time = t
-            min_y_x = x
-            after_highest_x = None
-            after_highest_time = None
-        else:
-            # 只要y持續下降就更新最高點
-            if y < min_y:
-                min_y = y
-                min_y_frame = i
-                min_y_time = t
-                min_y_x = x
-                after_highest_x = None
-                after_highest_time = None
-            # 一旦y開始上升，進入擊球判斷
-            elif y > min_y + vertical_threshold:
-                # 檢查垂直移動距離是否足夠
-                if vertical_movement_distance < min_vertical_movement:
-                    # 重置狀態，繼續尋找
-                    serve_start_frame = None
-                    serve_start_time = None
-                    serve_start_x = None
-                    serve_start_y = None
-                    min_y = None
-                    min_y_frame = None
-                    min_y_time = None
-                    min_y_x = None
-                    after_highest_x = None
-                    after_highest_time = None
-                    vertical_movement = False
-                    vertical_movement_distance = 0
-                    continue
+                if y < last_y: 
+                    upward_count += 1
+                else:
+                    upward_count = 0
                     
-                # 累積x位移
-                if after_highest_x is None:
-                    after_highest_x = x
-                    after_highest_time = t
-                dx_cum = abs(x - min_y_x)
-                duration = t - min_y_time
-                if duration <= max_serve_duration and dx_cum > horizontal_threshold:
-                    print(f"自動判斷發球：")
-                    print(f"  拋球開始：{serve_start_time:.2f}秒 (frame {serve_start_frame}, x={serve_start_x:.1f}, y={serve_start_y:.1f})")
-                    print(f"  最高點：{min_y_time:.2f}秒 (frame {min_y_frame}, x={min_y_x:.1f}, y={min_y:.1f})")
-                    print(f"  擊球：{t:.2f}秒 (frame {i}, x={x:.1f}, y={y:.1f})")
-                    print(f"  最高點到擊球時間：{duration:.2f}秒，水平累積位移：{dx_cum:.1f}像素")
-                    print(f"  垂直移動距離：{vertical_movement_distance:.1f}像素")
-                    serve_events.append({
-                        'start_frame': serve_start_frame,
-                        'start_time': serve_start_time,
-                        'highest_point_frame': min_y_frame,
-                        'highest_point_time': min_y_time,
-                        'highest_point': [min_y_x, min_y],
-                        'hit_frame': i,
-                        'hit_time': t,
-                        'hit_position': [x, y],
-                        'duration': duration,
-                        'horizontal_displacement': dx_cum,
-                        'vertical_movement': vertical_movement_distance
-                    })
-                    found_serve = True
-                    break
-                elif duration > max_serve_duration:
-                    # 超過時間限制，重置
-                    serve_start_frame = None
-                    serve_start_time = None
-                    serve_start_x = None
-                    serve_start_y = None
-                    min_y = None
-                    min_y_frame = None
-                    min_y_time = None
-                    min_y_x = None
-                    after_highest_x = None
-                    after_highest_time = None
-                    vertical_movement = False
-                    vertical_movement_distance = 0
+                # 進入拋球階段條件
+                if upward_count >= MIN_RISE_FRAMES and SERVE_AREA_X[0] <= x <= SERVE_AREA_X[1] and SERVE_AREA_Y[0] <= y <= SERVE_AREA_Y[1]:
+                    state = "TOSS"
+                    toss_start_frame = i - upward_count
+                    print(f"檢測到拋球開始: 幀 {toss_start_frame}, 位置 ({x:.1f}, {y:.1f})")
+            
+        elif state == "TOSS":
+            # 檢測頂點 (Y變化由正轉負)
+            if last_y is not None and y < last_y:
+                downward_count += 1
+            else:
+                downward_count = 0
+                
+            # 進入頂點狀態條件
+            if downward_count >= MIN_FALL_FRAMES:
+                state = "PEAK"
+                peak_frame = i - downward_count
+                print(f"檢測到軌跡頂點: 幀 {peak_frame}, 高度 {last_y:.1f}")
+                
+        elif state == "PEAK":
+            # 檢測擊球點 (快速水平移動)
+            if len(ball_history) > 5:
+                dx = x - ball_history[-5]['x']
+                dy = y - ball_history[-5]['y']
+                
+                # 擊球特徵: 快速水平移動 + 垂直下降
+                if abs(dx) > 30 and dy < -20:  
+                    state = "HIT"
+                    hit_frame = i
+                    # 計算發球持續時間
+                    duration = (hit_frame - toss_start_frame) / 30.0
+                    
+                    if duration <= MAX_SERVE_DURATION and toss_start_frame >= 0 and toss_start_frame < len(ball_history):
+                        print(f"檢測到擊球: 幀 {hit_frame}, 位置 ({x:.1f}, {y:.1f})")
+                        
+                        # 自動判斷發球方
+                        serving_player_id = determine_serving_player(
+                            frame_data, court_config, (x, y)
+                        )
+                        
+                        serve_events.append({
+                            'toss_frame': toss_start_frame,
+                            'peak_frame': peak_frame,
+                            'hit_frame': hit_frame,
+                            'toss_position': (ball_history[toss_start_frame]['x'], ball_history[toss_start_frame]['y']),
+                            'peak_position': (ball_history[peak_frame]['x'], ball_history[peak_frame]['y']),
+                            'hit_position': (x, y),
+                            'duration': duration,
+                            'serving_player_id': serving_player_id
+                        })
+                    
+                    # 重置狀態
+                    state = "IDLE"
+                    toss_start_frame = None
+                    peak_frame = None
+                    hit_frame = None
+                    upward_count = 0
+                    downward_count = 0
+        
+        last_y = y
 
     print(f"分析完成，共找到 {len(serve_events)} 個發球事件")
 
-    # 儲存分析結果
-    output_path = os.path.join(args.output_dir, 'serve_events_analysis.json')
-    os.makedirs(args.output_dir, exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
+    # 只輸出最早的發球-擊球事件
+    if serve_events:
+        earliest_event = serve_events[0]
+        print("\n最早的發球-擊球事件：")
+        print(f"發球開始：幀 {earliest_event['start_frame']}, 位置 ({earliest_event['start_position'][0]:.1f}, {earliest_event['start_position'][1]:.1f})")
+        print(f"擊球：幀 {earliest_event['hit_frame']}, 位置 ({earliest_event['hit_position'][0]:.1f}, {earliest_event['hit_position'][1]:.1f})")
+        print(f"持續幀數：{(earliest_event['hit_frame'] - earliest_event['start_frame'] ):.0f}")
+        #print(f"水平位移：{earliest_event['horizontal_displacement']:.1f} 像素")
+        #print(f"垂直移動：{earliest_event['vertical_movement']:.1f} 像素")
+
+def determine_serving_player(frame_data, court_config, hit_position):
+    """自動判斷發球球員"""
+    if not frame_data.get('player_detections'):
+        return None
+        
+    # 取得場地幾何資訊
+    court_poly = court_config.get('court_boundary_polygon')
+    baseline_y = court_config.get('baseline_y')
+    if not court_poly or baseline_y is None:
+        return None
+        
+    # 篩選後場球員
+    backcourt_players = []
+    for player in frame_data['player_detections']:
+        player_y = player['center_point'][1]
+        # 球員在底線後方20像素內視為後場球員
+        if player_y > baseline_y - 20:
+            backcourt_players.append(player)
+            
+    # 如果沒有後場球員，返回None
+    if not backcourt_players:
+        return None
+        
+    # 選擇最接近擊球點的球員
+    hit_x, hit_y = hit_position
+    serving_player = min(backcourt_players, 
+                        key=lambda p: abs(p['center_point'][0] - hit_x))
+    return serving_player.get('player_id', None)
+
+# 在主要循環中加入發球方判斷
+# ... [在擊球點檢測代碼塊中] ...
+    if x_change > X_HIT_THRESHOLD and y_change < Y_HIT_THRESHOLD:
+        # 判斷發球方
+        hit_frame_data = frames[hit_frame]
+        serving_player_id = determine_serving_player(
+            hit_frame_data, court_config, hit_point
+        )
+        
+        # 記錄完整的發球事件
+        serve_events.append({
+            'start_frame': serve_start_frame,
+            'start_time': serve_start_frame / 30.0,
+            'start_position': serve_start_pos,
+            'highest_point_frame': highest_point_frame,
+            'highest_point_time': highest_point_frame / 30.0,
+            'highest_point': highest_point,
+            'hit_frame': hit_frame,
+            'hit_time': hit_frame / 30.0,
+            'hit_position': hit_point,
+            'duration': duration,
+            'horizontal_displacement': horizontal_displacement,
+            'vertical_movement': vertical_movement,
+            'serving_player_id': serving_player_id  # 新增發球方ID
+        })
+
+# ... [後續代碼保持不變] ...
+
+# 儲存分析結果
+    output_file = os.path.join(args.output_dir, "serve_events_analysis.json")
+    with open(output_file, 'w') as f:
         json.dump(serve_events, f, indent=2)
-    print(f"分析完成，結果已保存到：{output_path}")
+    
+    print(f"分析完成，結果已保存到：{output_file}")
     print(f"共檢測到 {len(serve_events)} 個發球事件")
+    
+    # 輸出每個發球事件的幀數資訊
+    if serve_events:
+        print("\n發球事件詳細資訊：")
+        for i, event in enumerate(serve_events, 1):
+            print(f"\n發球事件 {i}:")
+            print(f"  開始幀數: {event['start_frame']}")
+            print(f"  最高點幀數: {event['highest_point_frame']}")
+            print(f"  擊球幀數: {event['hit_frame']}")
+            print(f"  持續幀數: {event['hit_frame'] - event['start_frame']}")
+            print(f"  水平位移: {event['horizontal_displacement']:.1f} 像素")
+            print(f"  垂直移動: {event['vertical_movement']:.1f} 像素")
 
 if __name__ == '__main__':
     main()
