@@ -1,35 +1,25 @@
 # video_processing/track_ball_and_player.py
-import os
-import cv2
-import argparse
-import numpy as np
+import os, cv2, argparse, numpy as np, sys, json
 from ultralytics import YOLO
-import sys
-import json
 from datetime import datetime
 
-# --- 專案路徑設定 ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_script_dir)
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+if project_root not in sys.path: sys.path.insert(0, project_root)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="【中文版】對沙灘排球影片進行球、球員追蹤及姿態估計。")
-    parser.add_argument("--input", type=str, required=True, help="輸入的短影片片段路徑")
-    parser.add_argument("--output_dir", type=str, default="output_data/tracking_output", help="追蹤結果的輸出根目錄")
-    parser.add_argument("--ball_model", type=str, default="models/ball_best.pt", help="排球偵測模型路徑")
-    parser.add_argument("--player_model", type=str, default="models/yolov8s-pose.pt", help="球員偵測與姿態估計模型路徑")
-    parser.add_argument("--conf", type=float, default=0.3, help="物件偵測的置信度閾值")
-    parser.add_argument("--device", type=str, default="0", help="推理設備: 'cpu' or GPU id (e.g., '0')")
-    parser.add_argument("--config_file_name", type=str, default="court_config.json", help="場地設定檔名稱")
-    parser.add_argument("--save_annotated_frames", action="store_true", help="[偵錯功能] 是否將「已標註」的每一幀儲存為圖片，用於視覺檢查。")
-    parser.add_argument("--save_original_frames", action="store_true", help="[訓練功能] 是否將「未標註」的原始每一幀儲存為圖片，用於模型訓練。")
-    parser.add_argument("--log_file", type=str, default=None, help="將日誌輸出到指定的檔案路徑。")
-    parser.add_argument("--log_mode", type=str, default='w', choices=['w', 'a'], help="日誌檔案的寫入模式 ('w' for write, 'a' for append).")
+    parser = argparse.ArgumentParser(description="[Final Version] Tracks ball and players, estimates pose.")
+    parser.add_argument("--input", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="output_data/tracking_output")
+    parser.add_argument("--ball_model", type=str, default="models/ball_best.pt")
+    parser.add_argument("--player_model", type=str, default="models/yolov8s-pose.pt")
+    parser.add_argument("--conf", type=float, default=0.3)
+    parser.add_argument("--device", type=str, default="0")
+    parser.add_argument("--config_file_name", type=str, default="court_config.json")
+    parser.add_argument("--save_annotated_frames", action="store_true")
+    parser.add_argument("--save_original_frames", action="store_true")
     return parser.parse_args()
 
-# --- 輔助函數 (維持不變) ---
 def detect_ball(frame, ball_model, conf_thresh, background_ball_zones):
     detected_balls = []
     try:
@@ -50,7 +40,7 @@ def detect_ball(frame, ball_model, conf_thresh, background_ball_zones):
                 "box_coords": [x1, y1, x2, y2], "confidence": float(box.conf[0].cpu().numpy()),
                 "center_point": [center_x, center_y], "is_in_background_zone": is_in_background_zone
             })
-    except Exception as e: print(f"!! 在 detect_ball 函數中發生預期外的錯誤: {e}")
+    except Exception as e: print(f"!! Exception in detect_ball: {e}")
     return detected_balls
 
 def detect_and_filter_players(frame, player_pose_model, conf_thresh, court_boundary_np, exclusion_zones_np, court_center_xy):
@@ -78,7 +68,7 @@ def detect_and_filter_players(frame, player_pose_model, conf_thresh, court_bound
                 "center_point": list(center_pt), "is_inside_court": bool(is_inside),
                 "distance_to_center": float(dist_to_center), "pose_keypoints": keypoints_xyc_list
             })
-    except Exception as e: print(f"!! 在 detect_and_filter_players 函數中發生預期外的錯誤: {e}")
+    except Exception as e: print(f"!! Exception in detect_and_filter_players: {e}")
     all_candidates.sort(key=lambda p: (not p['is_inside_court'], p['distance_to_center']))
     return all_candidates[:4]
 
@@ -107,88 +97,57 @@ def draw_detections(frame, balls, players, court_poly_np, exclusion_zones_np):
 
 def main():
     args = parse_args()
-    log_file_path = args.log_file
-    original_stdout = sys.stdout
-    log_file_handler = None
-    if log_file_path:
-        log_file_handler = open(log_file_path, args.log_mode, encoding='utf-8-sig')
-        sys.stdout = log_file_handler
-    
-    try:
-        print(f"--- 階段 1: 追蹤 (track_ball_and_player.py) ---")
-        print(f"開始時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*50)
-        print("--- 步驟 1: 檢查路徑與設定 ---")
-        video_base_name = os.path.splitext(os.path.basename(args.input))[0]
-        output_video_dir = os.path.join(project_root, args.output_dir, video_base_name)
-        os.makedirs(output_video_dir, exist_ok=True)
-        annotated_video_path = os.path.join(output_video_dir, f"{video_base_name}_annotated.mp4")
-        json_output_path = os.path.join(output_video_dir, f"{video_base_name}_all_frames_data_with_pose.json")
-        annotated_frames_dir = None
-        if args.save_annotated_frames:
-            annotated_frames_dir = os.path.join(output_video_dir, "annotated_frames"); os.makedirs(annotated_frames_dir, exist_ok=True)
-            print(f"  [資訊] 將儲存「已標註」的圖片至: {annotated_frames_dir}")
-        original_frames_dir = None
-        if args.save_original_frames:
-            original_frames_dir = os.path.join(output_video_dir, "original_frames_for_training"); os.makedirs(original_frames_dir, exist_ok=True)
-            print(f"  [資訊] 將儲存「原始」的圖片至: {original_frames_dir}")
-        config_path = os.path.join(project_root, args.config_file_name)
-        ball_model_path = os.path.join(project_root, args.ball_model)
-        player_model_path = os.path.join(project_root, args.player_model)
-        for path, name in [(config_path, "場地設定"), (ball_model_path, "球偵測模型"), (player_model_path, "姿態模型")]:
-            if not os.path.exists(path): print(f"[致命錯誤] 找不到 {name} 檔案！路徑: {path}"); sys.exit(1)
-        print("[成功] 所有設定與模型檔案都存在。")
-        print("\n--- 步驟 2: 載入 AI 模型 ---")
-        device = f"cuda:{args.device}" if args.device.isdigit() else "cpu"
-        ball_model = YOLO(ball_model_path).to(device); player_model = YOLO(player_model_path).to(device)
-        print("[成功] 模型載入成功！")
-        with open(config_path, 'r', encoding='utf-8') as f_config: court_config = json.load(f_config)
-        court_boundary_np = np.array(court_config['court_boundary_polygon'], dtype=np.int32) if court_config.get('court_boundary_polygon') else None
-        exclusion_zones_np = [np.array(zone, dtype=np.int32) for zone in court_config.get('exclusion_zones', [])]
-        court_center_xy = None
-        if court_boundary_np is not None:
-            M = cv2.moments(court_boundary_np)
-            if M["m00"] != 0: court_center_xy = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-        print("\n--- 步驟 3: 初始化影片處理器 ---")
-        cap = cv2.VideoCapture(args.input)
-        if not cap.isOpened(): print(f"[致命錯誤] 無法開啟輸入影片！路徑: {args.input}"); sys.exit(1)
-        fps, w, h = cap.get(cv2.CAP_PROP_FPS), int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"  [資訊] 影片屬性: {w}x{h} @ {fps:.2f} FPS")
-        writer = cv2.VideoWriter(annotated_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-        if not writer.isOpened(): print("[警告] 影片寫入器開啟失敗！");
-        else: print("[成功] 影片寫入器已開啟。")
-        print("\n--- 步驟 4: 開始逐幀分析 ---")
-        
-        # ✨ 核心修正：在這裡初始化 all_frames_data 和 frame_id_counter ✨
-        all_frames_data = []
-        frame_id_counter = 0
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret: print("\n  [資訊] 影片已讀取完畢。"); break
-            if frame_id_counter % 90 == 0: print(f"  [資訊] 正在處理第 {frame_id_counter} 幀...")
-            if args.save_original_frames and original_frames_dir:
-                cv2.imwrite(os.path.join(original_frames_dir, f"frame_{frame_id_counter:05d}.jpg"), frame)
-            balls = detect_ball(frame, ball_model, args.conf, court_config.get("background_ball_zones", []))
-            players = detect_and_filter_players(frame, player_model, args.conf, court_boundary_np, exclusion_zones_np, court_center_xy)
-            all_frames_data.append({"frame_id": frame_id_counter, "ball_detections": balls, "player_detections": players})
-            draw_detections(frame, balls, players, court_boundary_np, exclusion_zones_np)
-            if args.save_annotated_frames and annotated_frames_dir:
-                cv2.imwrite(os.path.join(annotated_frames_dir, f"frame_{frame_id_counter:05d}.jpg"), frame)
-            writer.write(frame); frame_id_counter += 1
-        print("\n--- 步驟 5: 完成與儲存 ---")
-        cap.release(); writer.release(); cv2.destroyAllWindows()
-        with open(json_output_path, 'w', encoding='utf-8') as f_json: json.dump(all_frames_data, f_json, indent=2)
-        print("[成功] JSON 數據已儲存。")
-        try:
-            file_size = os.path.getsize(annotated_video_path)
-            print(f"[成功] 影片檔案已儲存。最終大小: {file_size / 1024:.2f} KB")
-            if file_size == 0: print("[警告] 輸出影片檔案大小為 0 KB。")
-        except OSError as e: print(f"[錯誤] 無法檢查輸出影片的檔案大小: {e}")
-    finally:
-        if log_file_handler:
-            sys.stdout = original_stdout
-            log_file_handler.close()
+    print(f"--- Tracking process started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+    print("--- Step 1: Checking paths and settings ---")
+    video_base_name = os.path.splitext(os.path.basename(args.input))[0]
+    output_video_dir = os.path.join(project_root, args.output_dir, video_base_name)
+    os.makedirs(output_video_dir, exist_ok=True)
+    annotated_video_path = os.path.join(output_video_dir, f"{video_base_name}_annotated.mp4")
+    json_output_path = os.path.join(output_video_dir, f"{video_base_name}_all_frames_data_with_pose.json")
+    if args.save_annotated_frames:
+        annotated_frames_dir = os.path.join(output_video_dir, "annotated_frames"); os.makedirs(annotated_frames_dir, exist_ok=True)
+        print(f"  [INFO] Saving annotated frames to: {annotated_frames_dir}")
+    if args.save_original_frames:
+        original_frames_dir = os.path.join(output_video_dir, "original_frames_for_training"); os.makedirs(original_frames_dir, exist_ok=True)
+        print(f"  [INFO] Saving original frames to: {original_frames_dir}")
+    config_path = os.path.join(project_root, args.config_file_name)
+    if not os.path.exists(config_path): print(f"[FATAL] Config file not found: {config_path}"); sys.exit(1)
+    print("[OK] All config and model files exist.")
+    print("\n--- Step 2: Loading AI Models ---")
+    device = f"cuda:{args.device}" if args.device.isdigit() else "cpu"
+    ball_model = YOLO(os.path.join(project_root, args.ball_model)).to(device); player_model = YOLO(os.path.join(project_root, args.player_model)).to(device)
+    print("[OK] Models loaded successfully.")
+    with open(config_path, 'r', encoding='utf-8') as f: court_config = json.load(f)
+    court_boundary_np = np.array(court_config['court_boundary_polygon'], dtype=np.int32) if 'court_boundary_polygon' in court_config else None
+    exclusion_zones_np = [np.array(zone, dtype=np.int32) for zone in court_config.get('exclusion_zones', [])]
+    court_center_xy = None
+    if court_boundary_np is not None:
+        M = cv2.moments(court_boundary_np)
+        if M["m00"] != 0: court_center_xy = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+    print("\n--- Step 3: Initializing Video Processor ---")
+    cap = cv2.VideoCapture(args.input)
+    if not cap.isOpened(): print(f"[FATAL] Cannot open video: {args.input}"); sys.exit(1)
+    fps, w, h = cap.get(cv2.CAP_PROP_FPS), int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    writer = cv2.VideoWriter(annotated_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+    print(f"  [INFO] Processing video: {w}x{h} @ {fps:.2f} FPS")
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print("\n--- Step 4: Starting Frame-by-Frame Analysis ---")
+    all_frames_data, frame_id_counter = [], 0
+    while True:
+        ret, frame = cap.read()
+        if not ret: print("\n[INFO] End of video."); break
+        if frame_id_counter % 90 == 0: print(f"  [INFO] Processing frame {frame_id_counter}/{frame_count}...")
+        if args.save_original_frames: cv2.imwrite(os.path.join(original_frames_dir, f"frame_{frame_id_counter:05d}.jpg"), frame)
+        balls = detect_ball(frame, ball_model, args.conf, court_config.get("background_ball_zones", []))
+        players = detect_and_filter_players(frame, player_model, args.conf, court_boundary_np, exclusion_zones_np, court_center_xy)
+        all_frames_data.append({"frame_id": frame_id_counter, "ball_detections": balls, "player_detections": players})
+        draw_detections(frame, balls, players, court_boundary_np, exclusion_zones_np)
+        if args.save_annotated_frames: cv2.imwrite(os.path.join(annotated_frames_dir, f"frame_{frame_id_counter:05d}.jpg"), frame)
+        writer.write(frame); frame_id_counter += 1
+    print("\n--- Step 5: Finalizing and Saving ---")
+    cap.release(); writer.release(); cv2.destroyAllWindows()
+    with open(json_output_path, 'w', encoding='utf-8') as f: json.dump(all_frames_data, f, indent=2)
+    print(f"[OK] Processing complete. Output saved to {output_video_dir}")
 
 if __name__ == '__main__':
     main()
