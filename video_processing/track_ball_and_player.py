@@ -1,11 +1,27 @@
+# -*- coding: utf-8 -*-
 # video_processing/track_ball_and_player.py
-import os, cv2, argparse, numpy as np, sys, json
+
+# ✨ --- 【終極編碼修正】 --- ✨
+# 強制將標準輸出與錯誤輸出的編碼設為 UTF-8
+# 這可以解決在 Windows 環境下呼叫子程序時的亂碼問題
+import sys
+import codecs
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+# ✨ ------------------------- ✨
+
+import os, cv2, argparse, numpy as np, json
 from ultralytics import YOLO
 from datetime import datetime
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_script_dir)
 if project_root not in sys.path: sys.path.insert(0, project_root)
+
+# ... (您檔案的其餘所有函式與 main() 內容維持不變)
+# ... (The rest of your file's functions and main() content remain unchanged)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="[Final Version] Tracks ball and players, estimates pose.")
@@ -18,6 +34,7 @@ def parse_args():
     parser.add_argument("--config_file_name", type=str, default="court_config.json")
     parser.add_argument("--save_annotated_frames", action="store_true")
     parser.add_argument("--save_original_frames", action="store_true")
+    parser.add_argument("--save_all_frames", action="store_true", help="[Data Export] Save EVERY original frame from the video.")
     return parser.parse_args()
 
 def detect_ball(frame, ball_model, conf_thresh, background_ball_zones):
@@ -98,6 +115,7 @@ def draw_detections(frame, balls, players, court_poly_np, exclusion_zones_np):
 def main():
     args = parse_args()
     print(f"--- Tracking process started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+    # ... (其餘 main 函數內容不變)
     print("--- Step 1: Checking paths and settings ---")
     video_base_name = os.path.splitext(os.path.basename(args.input))[0]
     output_video_dir = os.path.join(project_root, args.output_dir, video_base_name)
@@ -110,6 +128,10 @@ def main():
     if args.save_original_frames:
         original_frames_dir = os.path.join(output_video_dir, "original_frames_for_training"); os.makedirs(original_frames_dir, exist_ok=True)
         print(f"  [INFO] Saving original frames to: {original_frames_dir}")
+    if args.save_all_frames:
+        all_frames_dir = os.path.join(output_video_dir, "all_original_frames")
+        os.makedirs(all_frames_dir, exist_ok=True)
+        print(f"  [INFO] Saving ALL original frames to: {all_frames_dir}")
     config_path = os.path.join(project_root, args.config_file_name)
     if not os.path.exists(config_path): print(f"[FATAL] Config file not found: {config_path}"); sys.exit(1)
     print("[OK] All config and model files exist.")
@@ -136,6 +158,9 @@ def main():
     while True:
         ret, frame = cap.read()
         if not ret: print("\n[INFO] End of video."); break
+        if args.save_all_frames:
+            frame_filename = f"frame_{frame_id_counter + 1:06d}.jpg"
+            cv2.imwrite(os.path.join(all_frames_dir, frame_filename), frame)
         if frame_id_counter % 90 == 0: print(f"  [INFO] Processing frame {frame_id_counter}/{frame_count}...")
         if args.save_original_frames: cv2.imwrite(os.path.join(original_frames_dir, f"frame_{frame_id_counter:05d}.jpg"), frame)
         balls = detect_ball(frame, ball_model, args.conf, court_config.get("background_ball_zones", []))

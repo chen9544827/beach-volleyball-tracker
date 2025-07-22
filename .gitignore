@@ -180,6 +180,7 @@ __pycache__/
 *json
 *.avi
 *.mp4
+*.7z
 # VSCode 設定（如果你用 VSCode）
 .vscode/
 
