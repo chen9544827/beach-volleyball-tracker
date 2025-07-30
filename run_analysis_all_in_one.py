@@ -97,7 +97,7 @@ def process_single_video(video_path, base_output_dir, overwrite, frame_args, ana
         tracking_output_path = os.path.join(video_specific_output_dir, 'tracking_output')
         analysis_output_path = os.path.join(video_specific_output_dir, 'analysis_output')
         final_video_output = os.path.join(analysis_output_path, f"{video_base_name}_analysis.mp4")
-        json_input_path = os.path.join(tracking_output_path, video_base_name, f"{video_base_name}_all_frames_data_with_pose.json")
+        json_input_path = os.path.join(tracking_output_path, f"{video_base_name}_all_frames_data_with_pose.json")
         if not overwrite and os.path.exists(final_video_output):
             return {"video": video_base_name, "status": "skipped", "log": "最終輸出檔案已存在。", "events": [], "tracking_data_path": None}
         os.makedirs(analysis_output_path, exist_ok=True)
