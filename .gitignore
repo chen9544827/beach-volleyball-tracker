@@ -181,6 +181,7 @@ __pycache__/
 *.avi
 *.mp4
 *.7z
+*.zip
 # VSCode 設定（如果你用 VSCode）
 .vscode/
 
