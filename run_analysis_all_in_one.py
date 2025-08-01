@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# run_analysis_all_in_one.py (最終通用版 v3 - 已修正 NameError)
-# 核心偵測邏輯採用您的版本，並結合回溯尋人法 + 精確距離計算。
+# run_analysis_all_in_one.py (最終通用版 v4 - 增加發球區域判斷)
+# 核心偵測邏輯採用您的版本，並結合回溯尋人法 + 精確距離計算 + 發球區域判斷。
 
 import os
 import subprocess
@@ -13,7 +13,7 @@ from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import io
 
-# --- 自動安裝並匯入 tqdm ---
+# --- (此處省略了與上一版相同的 tqdm 程式碼) ---
 try:
     from tqdm import tqdm
 except ImportError:
@@ -36,9 +36,6 @@ def get_ball_center_from_data(frame_data):
         return np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
 
 def get_distance_to_player_box(point, player_box):
-    """
-    計算一個點 (球的中心) 到一個矩形 (球員偵測框) 的最短距離。
-    """
     px, py = point
     x1, y1, x2, y2 = player_box
     closest_x = max(x1, min(px, x2))
@@ -46,11 +43,45 @@ def get_distance_to_player_box(point, player_box):
     distance = np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
     return distance
 
+def get_player_center(player_data):
+    if not player_data or 'center_point' not in player_data: return None
+    return np.array(player_data['center_point'])
+
+# ✨ NEW HELPER FUNCTION: Determines the serving zone (A, B, C)
+def get_serving_zone(server_center, court_polygon):
+    """
+    根據發球員的中心點和球場的四個角落，判斷發球區域 (A, B, C)。
+    - 假設:
+        - court_polygon 的點順序為 [左上, 左下, 右下, 右上]。
+        - 發球員總是在Y座標較大的「下半場」發球。
+    - 傳回: 'A', 'B', 'C', 或 'Unknown'
+    """
+    if server_center is None or len(court_polygon) != 4:
+        return 'Unknown'
+
+    # 我們關心的是下半場的底線，也就是 P1 和 P2
+    p1 = np.array(court_polygon[1])  # 左下角
+    p2 = np.array(court_polygon[2])  # 右下角
+
+    # 計算底線上 A/B 和 B/C 區的分割點
+    zone_ab_divider = p1 + (p2 - p1) / 3
+    zone_bc_divider = p1 + 2 * (p2 - p1) / 3
+
+    server_x = server_center[0]
+
+    # 為了應對非水平的底線，我們使用分割點的X座標作為判斷依據
+    if server_x < zone_ab_divider[0]:
+        return 'A'
+    elif server_x < zone_bc_divider[0]:
+        return 'B'
+    else:
+        return 'C'
+
 # ==============================================================================
-#  您 的 發 球 偵 測 邏 輯 (100% 原 汁 原 味)
+#  (analyze_serve_events 和 process_single_video 函數與上一版相同，此處省略)
 # ==============================================================================
 def analyze_serve_events(all_frames_data, config, log_prefix=""):
-    # (此函數與上一版完全相同，100%採用您的邏輯)
+    # This function is identical to the previous version.
     hit_v_thresh = config.get("hit_v", 40.0)
     max_plausible_speed = config.get("max_speed", 200.0)
     toss_initial_vy_thresh = config.get("toss_vy", 8.0)
@@ -100,10 +131,8 @@ def analyze_serve_events(all_frames_data, config, log_prefix=""):
                     state = "SEARCHING_TOSS"
     return serve_events
 
-# ==============================================================================
-#  (process_single_video 函數與上一版相同)
-# ==============================================================================
 def process_single_video(video_path, base_output_dir, overwrite, frame_args, analysis_args):
+    # This function is identical to the previous version.
     video_base_name = os.path.splitext(os.path.basename(video_path))[0]
     log_prefix = f"[{video_base_name}] "
     try:
@@ -145,77 +174,93 @@ def process_single_video(video_path, base_output_dir, overwrite, frame_args, ana
         return {"video": video_base_name, "status": "failed", "log": error_message, "events": [], "original_video_path": video_path}
 
 # ==============================================================================
-#  (Summary 產生器與上一版相同)
+# ✨ 核心修改：Summary 產生器，增加發球區域判斷 ✨
 # ==============================================================================
-def create_first_hit_summary(results, base_output_dir, search_offset):
-    print("\n" + "="*80); print(f"--- 正在產生首次擊球總結報告 (使用精確邊緣距離演算法)... ---")
-    summary_dir = os.path.join(base_output_dir, "first_hit_summary_universal")
+def create_first_hit_summary(results, base_output_dir, search_offset, court_polygon):
+    print("\n" + "="*80); print(f"--- 正在產生首次擊球總結報告 (增加發球區域判斷)... ---")
+    summary_dir = os.path.join(base_output_dir, "first_hit_summary_with_zone")
     os.makedirs(summary_dir, exist_ok=True)
     summary_txt_path = os.path.join(summary_dir, f"first_hit_frames_offset_{search_offset}.txt")
-    count = 0
+    
     with open(summary_txt_path, 'w', encoding='utf-8') as f:
         f.write(f"--- 每個影片片段首次偵測到的擊球資訊 (回溯 {search_offset} 幀) ---\n\n")
+        
         for result in sorted(results, key=lambda r: r['video']):
             if result['status'] != 'success' or not result.get('events'): continue
+            
             video_base_name = result['video']
             first_event = result['events'][0]
             hit_frame_id = first_event['hit_frame_id']
-            hit_position = first_event['hit_position']
             tracking_path = result.get('tracking_data_path')
+
             if not tracking_path or not os.path.exists(tracking_path): continue
             with open(tracking_path, 'r', encoding='utf-8') as json_f: all_frames_data = json.load(json_f)
+
             player_search_frame_id = max(0, hit_frame_id - search_offset)
-            server_data, server_id_str = None, "未知"
+            server_data = None
+            
             if player_search_frame_id < len(all_frames_data):
                 search_frame_data = all_frames_data[player_search_frame_id]
                 ball_pos_at_search_frame = get_ball_center_from_data(search_frame_data)
                 all_players_at_search_frame = search_frame_data.get('player_detections', [])
+                
                 if ball_pos_at_search_frame is not None and all_players_at_search_frame:
-                    closest_player = min(all_players_at_search_frame, key=lambda p: get_distance_to_player_box(ball_pos_at_search_frame, p['box_coords']))
-                    server_data, server_id_str = closest_player.copy(), f"位於 ({int(closest_player.get('center_point',[0,0])[0])}, {int(closest_player.get('center_point',[0,0])[1])})"
-                    print(f"[{video_base_name}] 在第 {hit_frame_id} 幀偵測到擊球，回溯到第 {player_search_frame_id} 幀，並成功鎖定發球員。")
-                else:
-                    reason = "無球或無球員"
-                    server_id_str = f"未知 ({reason})"
-                    print(f"[{video_base_name}] 警告：在回溯幀 {player_search_frame_id} 未能鎖定發球員。原因: {reason}")
+                    server_data = min(all_players_at_search_frame, key=lambda p: get_distance_to_player_box(ball_pos_at_search_frame, p['box_coords']))
+            
+            # ✨ NEW LOGIC: Determine serving zone
+            serving_zone = "Unknown"
+            if server_data:
+                server_center = get_player_center(server_data)
+                serving_zone = get_serving_zone(server_center, court_polygon)
+                print(f"[{video_base_name}] 成功鎖定發球員，判斷其位於區域: {serving_zone}")
             else:
-                server_id_str = "未知 (回溯幀超出影片範圍)"
-            f.write(f"{video_base_name}: 擊球偵測幀={hit_frame_id}, 球員搜尋幀={player_search_frame_id}, 發球員={server_id_str}\n")
+                 print(f"[{video_base_name}] 未能鎖定發球員，無法判斷區域。")
+
+            f.write(f"{video_base_name}: 擊球偵測幀={hit_frame_id}, 發球區域={serving_zone}\n")
+            
             original_video_path = result.get('original_video_path')
             if not original_video_path: continue
+
             try:
                 cap = cv2.VideoCapture(original_video_path)
                 if not cap.isOpened(): continue
-                for frame_offset in range(-3, 4):
-                    frame_to_capture = hit_frame_id + frame_offset
-                    if frame_to_capture < 0: continue
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_to_capture)
-                    ret, frame = cap.read()
-                    if ret:
-                        cv2.circle(frame, tuple(map(int, hit_position)), 40, (0, 255, 0), 4)
-                        if server_data:
-                            box = server_data['box_coords']
-                            p1, p2 = (int(box[0]), int(box[1])), (int(box[2]), int(box[3]))
-                            cv2.rectangle(frame, p1, p2, (255, 0, 255), 3)
-                            if frame_to_capture == hit_frame_id:
-                                cv2.putText(frame, f"SERVER (Found at F-{search_offset})", (p1[0], p1[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 0, 255), 3)
-                        if frame_to_capture == player_search_frame_id:
-                             debug_img_name = f"{video_base_name}_frame_{frame_to_capture:06d}_SEARCH_DEBUG.jpg"
-                             if ball_pos_at_search_frame is not None:
-                                 for p_idx, p in enumerate(all_players_at_search_frame):
-                                     dist = get_distance_to_player_box(ball_pos_at_search_frame, p['box_coords'])
-                                     cv2.putText(frame, f"D:{dist:.1f}", (int(p['box_coords'][0]), int(p['box_coords'][1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-                             cv2.imwrite(os.path.join(summary_dir, debug_img_name), frame)
-                        tag = "_HIT" if frame_to_capture == hit_frame_id else (f"_PRE_{hit_frame_id - frame_to_capture}" if frame_to_capture < hit_frame_id else f"_POST_{frame_to_capture - hit_frame_id}")
-                        img_name = f"{video_base_name}_frame_{frame_to_capture:06d}{tag}.jpg"
-                        cv2.imwrite(os.path.join(summary_dir, img_name), frame)
-                cap.release(); count += 1
-            except Exception as e: print(f"[錯誤] 擷取 {video_base_name} 的關鍵幀時失敗: {e}")
-    print(f"\n總結報告產生完畢！共擷取了 {count} 個影片的關鍵幀。"); print(f"詳細資訊請見: {os.path.abspath(summary_dir)}")
+                cap.set(cv2.CAP_PROP_POS_FRAMES, hit_frame_id)
+                ret, hit_frame_image = cap.read()
+                if ret and server_data:
+                    # 在擊球幀上繪製標記
+                    p1 = (int(server_data['box_coords'][0]), int(server_data['box_coords'][1]))
+                    p2 = (int(server_data['box_coords'][2]), int(server_data['box_coords'][3]))
+                    cv2.rectangle(hit_frame_image, p1, p2, (255, 0, 255), 3)
+                    
+                    # ✨ NEW VISUALIZATION: Display the zone on the image
+                    text = f"SERVER (Zone: {serving_zone})"
+                    cv2.putText(hit_frame_image, text, (p1[0], p1[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 0, 255), 3)
+                    
+                    # 畫出球場和分區線用於偵錯
+                    if court_polygon:
+                        pts = np.array(court_polygon, np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(hit_frame_image, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
+                        p1_base = np.array(court_polygon[1])
+                        p2_base = np.array(court_polygon[2])
+                        div1 = tuple(map(int, p1_base + (p2_base - p1_base) / 3))
+                        div2 = tuple(map(int, p1_base + 2 * (p2_base - p1_base) / 3))
+                        cv2.line(hit_frame_image, (div1[0], div1[1] - 20), (div1[0], div1[1] + 20), (0, 255, 255), 3)
+                        cv2.line(hit_frame_image, (div2[0], div2[1] - 20), (div2[0], div2[1] + 20), (0, 255, 255), 3)
+                    
+                    img_name = f"{video_base_name}_frame_{hit_frame_id:06d}_zoned.jpg"
+                    cv2.imwrite(os.path.join(summary_dir, img_name), hit_frame_image)
+                cap.release()
+            except Exception as e:
+                print(f"[錯誤] 繪製 {video_base_name} 的區域圖片時失敗: {e}")
+                
+    print(f"\n總結報告產生完畢！"); print(f"詳細資訊請見: {os.path.abspath(summary_dir)}")
 
 def main():
-    parser = argparse.ArgumentParser(description="[最終通用版 v3] 自動化分析排球影片，使用精確距離演算法。")
-    # (此處省略了與上一版相同的參數定義)
+    parser = argparse.ArgumentParser(description="[最終通用版 v4] 自動化分析排球影片，增加發球區域判斷功能。")
+    # ✨ NEW ARGUMENT: --court_config is now required.
+    parser.add_argument("--court_config", type=str, required=True, help="定義了球場邊界的 court_config.json 檔案路徑。")
+    
+    # (此處省略了與上一版相同的其他參數定義)
     parser.add_argument("--input_folder", type=str, required=True, help="包含影片檔案的輸入資料夾。")
     parser.add_argument("--output_folder", type=str, default="volleyball_analysis_results", help="儲存所有分析結果的根目錄。")
     parser.add_argument("--workers", type=int, default=None, help="指定平行處理的核心數，預設為電腦所有核心。")
@@ -236,24 +281,32 @@ def main():
     frame_group.add_argument("--save_all_frames", action="store_true", help="(可選) 讓追蹤腳本儲存所有原始畫格。")
     
     args = parser.parse_args()
-    frame_args = {'save_all_frames': args.save_all_frames}
-    analysis_args = {k: v for k, v in vars(args).items() if k not in ['input_folder', 'output_folder', 'workers', 'overwrite', 'save_all_frames']}
     
+    # ✨ NEW LOGIC: Load court configuration once at the beginning.
+    try:
+        with open(args.court_config, 'r') as f:
+            court_config = json.load(f)
+        court_polygon = court_config.get("court_boundary_polygon")
+        if not court_polygon or len(court_polygon) != 4:
+            raise ValueError("court_boundary_polygon not found or is not a 4-point list in the config file.")
+    except Exception as e:
+        print(f"讀取或解析 --court_config 檔案 '{args.court_config}' 時發生錯誤: {e}")
+        sys.exit(1)
+
+    frame_args = {'save_all_frames': args.save_all_frames}
+    analysis_args = {k: v for k, v in vars(args).items() if k not in ['input_folder', 'output_folder', 'workers', 'overwrite', 'save_all_frames', 'court_config']}
+    
+    # (此處省略了與上一版相同的 ProcessPoolExecutor 程式碼)
     script_start_time = datetime.now()
     video_files = find_video_files(args.input_folder)
     if not video_files: print(f"[錯誤] 在 '{args.input_folder}' 中找不到任何支援的影片檔案。"); return
-    
     base_output_dir = os.path.abspath(args.output_folder)
     os.makedirs(base_output_dir, exist_ok=True)
     max_workers = args.workers if args.workers and args.workers > 0 else (os.cpu_count() or 1)
-    
     print(f"[資訊] 找到 {len(video_files)} 個影片。將使用最多 {max_workers} 個核心進行平行處理。")
-    
     results = []
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_single_video, vp, base_output_dir, args.overwrite, frame_args, analysis_args): vp for vp in video_files}
-        
-        # ✨ BUG FIX: Corrected p_bar to pbar ✨
         with tqdm(total=len(futures), desc="整體進度", unit="video") as pbar:
             for future in as_completed(futures):
                 pbar.update(1)
@@ -262,9 +315,11 @@ def main():
                 except Exception as exc: 
                     video_path = futures[future]
                     results.append({"video": os.path.basename(video_path), "status": "failed", "log": f"執行時發生嚴重錯誤: {exc}", "events": [], "original_video_path": video_path})
+
+    # ✨ NEW LOGIC: Pass the loaded court_polygon to the summary function.
+    create_first_hit_summary(results, base_output_dir, args.search_offset, court_polygon)
     
-    create_first_hit_summary(results, base_output_dir, args.search_offset)
-    
+    # (此處省略了與上一版相同的最終報告生成程式碼)
     print("\n" + "="*80); print("--- 所有任務已完成，正在生成最終摘要報告... ---")
     summary_path = os.path.join(base_output_dir, "summary_report.txt")
     success_videos = [r for r in results if r['status'] == 'success']
@@ -278,7 +333,7 @@ def main():
     print(f"摘要報告已生成於: {summary_path}"); print(f"執行結果: {len(success_videos)} 成功, {len(failed_videos)} 失敗, {len(skipped_videos)} 跳過。"); print("="*80)
 
 def find_video_files(directory):
-    supported_formats = ('.mp4', '.avi', '.mov', '.mkv')
+    supported_formats = ('.mp4', '.avi', 'mov', '.mkv')
     video_files = []
     for root, _, files in os.walk(directory):
         for file in files:
