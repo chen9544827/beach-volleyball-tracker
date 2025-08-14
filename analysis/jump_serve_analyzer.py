@@ -1,41 +1,25 @@
-# analysis/jump_serve_analyzer.py (v6 - 增加偵錯資訊回傳)
+# analysis/jump_serve_analyzer.py (v5.1 - 程式碼優化)
 
 import numpy as np
 
 def get_player_center(player_data):
-    """ 從球員資料中獲取中心點。 """
-    if not player_data or 'center_point' not in player_data:
-        return None
+    if not player_data or 'center_point' not in player_data: return None
     return np.array(player_data['center_point'])
 
 def analyze_jump_serve_by_pose(all_frames_data, server_data, hit_frame_id, config):
-    """
-    【位移分析法】
-    回傳結果以及一個包含偵錯資訊的字典。
-    """
     jump_height_threshold = config.get('jump_height_threshold', 20)
     action_window = range(max(0, hit_frame_id - 35), hit_frame_id)
-    
-    # 初始化偵錯資訊字典
-    debug_info = {
-        "status": "Started",
-        "action_window": list(action_window),
-        "hip_y_trajectory": [],
-        "crouch_y": None,
-        "peak_y": None,
-        "displacement": None
-    }
 
     if not server_data or not server_data.get('pose_keypoints'):
-        debug_info["status"] = "Error: No pose_keypoints in initial server data."
-        return 'Unknown (No pose_keypoints)', debug_info
+        return 'Unknown (No pose_keypoints)', {}
 
     server_initial_pos = get_player_center(server_data)
     if server_initial_pos is None:
-        debug_info["status"] = "Error: No center point in initial server data."
-        return 'Unknown (No Center)', debug_info
+        return 'Unknown (No Center)', {}
 
+    debug_info = { "status": "Started", "action_window": list(action_window), "hip_y_trajectory": [] }
     hip_y_trajectory = []
+    
     for frame_idx in action_window:
         if frame_idx >= len(all_frames_data): continue
         frame_data = all_frames_data[frame_idx]
@@ -52,7 +36,6 @@ def analyze_jump_serve_by_pose(all_frames_data, server_data, hit_frame_id, confi
 
         left_hip_y = kpts[11, 1] if kpts[11, 2] > 0.3 else np.nan
         right_hip_y = kpts[12, 1] if kpts[12, 2] > 0.3 else np.nan
-        
         avg_hip_y = np.nanmean([left_hip_y, right_hip_y])
         
         if not np.isnan(avg_hip_y):
@@ -68,12 +51,7 @@ def analyze_jump_serve_by_pose(all_frames_data, server_data, hit_frame_id, confi
     peak_y = min(hip_y_trajectory)
     vertical_displacement = crouch_y - peak_y
 
-    debug_info.update({
-        "crouch_y": crouch_y,
-        "peak_y": peak_y,
-        "displacement": vertical_displacement,
-        "threshold": jump_height_threshold
-    })
+    debug_info.update({ "crouch_y": crouch_y, "peak_y": peak_y, "displacement": vertical_displacement, "threshold": jump_height_threshold })
     
     if vertical_displacement > jump_height_threshold:
         debug_info["status"] = "Success: Judged as JUMP."
