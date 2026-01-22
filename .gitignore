@@ -187,3 +187,6 @@ __pycache__/
 # VSCode 設定（如果你用 VSCode）
 .vscode/
 
+# Ralph AI 工具檔案
+.ralph/
+cline_mcp_settings.json

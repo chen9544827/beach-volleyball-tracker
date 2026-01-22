@@ -1,40 +1,19 @@
-# video_processing/video_slicer_by_score.py (v5 - 支援外部配置檔)
+# video_processing/video_slicer_by_score.py (v4 - 僅在超過閾值時顯示 SAD)
 import cv2
 import os
 import argparse
 import numpy as np
 import csv
-import json
 
-# --- 預設 ROI 設定 (Fallback) ---
-# 當未提供配置檔時使用這些預設值
-DEFAULT_SCORE_ROI_TEAM1 = (280, 29, 59, 51)  # 隊伍1 (例如:上方/左方) 的分數區域 (x, y, w, h)
-DEFAULT_SCORE_ROI_TEAM2 = (287, 92, 59, 50)  # 隊伍2 (例如:下方/右方) 的分數區域 (x, y, w, h)
-
-def load_scoreboard_config(config_path):
-    """從 JSON 檔案載入記分板配置"""
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        
-        team1 = config.get('score_roi_team1', {})
-        team2 = config.get('score_roi_team2', {})
-        
-        roi_team1 = (team1['x'], team1['y'], team1['w'], team1['h'])
-        roi_team2 = (team2['x'], team2['y'], team2['w'], team2['h'])
-        
-        print(f"✓ 已從配置檔載入 ROI 座標: {config_path}")
-        return roi_team1, roi_team2
-    except Exception as e:
-        print(f"⚠️  載入配置檔失敗: {e}")
-        print(f"   使用預設 ROI 座標")
-        return DEFAULT_SCORE_ROI_TEAM1, DEFAULT_SCORE_ROI_TEAM2
+# --- 設定 ---
+# 這些 ROI 座標需要你根據你的影片手動調整
+SCORE_ROI_TEAM1 = (280, 29, 59, 51)  # 隊伍1 (例如:上方/左方) 的分數區域 (x, y, w, h)
+SCORE_ROI_TEAM2 = (287, 92, 59, 50)  # 隊伍2 (例如:下方/右方) 的分數區域 (x, y, w, h)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="根據兩個獨立分數ROI的影像變化來分割影片，並判斷得分方。")
     parser.add_argument("--input", type=str, required=True, help="輸入的長時間影片檔案路徑")
     parser.add_argument("--output_dir", type=str, default="output_data/video_segments_with_score", help="儲存分割後影片片段與報告的根目錄")
-    parser.add_argument("--scoreboard_config", type=str, help="記分板配置檔路徑 (scoreboard_config.json)")
     parser.add_argument("--min_segment_duration", type=int, default=10, help="有效比賽片段的最小持續時間 (秒)")
     parser.add_argument("--long_segment_threshold", type=int, default=90, help="長片段的閾值 (秒)")
     parser.add_argument("--roi_check_interval", type=float, default=0.5, help="每隔多少秒檢查一次ROI變化 (秒)")
@@ -113,17 +92,6 @@ def write_summary_csv(summary_data, output_dir):
 def main():
     args = parse_arguments()
     
-    # 載入 ROI 配置
-    if args.scoreboard_config and os.path.exists(args.scoreboard_config):
-        SCORE_ROI_TEAM1, SCORE_ROI_TEAM2 = load_scoreboard_config(args.scoreboard_config)
-        roi_source = f"配置檔: {args.scoreboard_config}"
-    else:
-        SCORE_ROI_TEAM1 = DEFAULT_SCORE_ROI_TEAM1
-        SCORE_ROI_TEAM2 = DEFAULT_SCORE_ROI_TEAM2
-        roi_source = "預設值 (硬編碼)"
-        if args.scoreboard_config:
-            print(f"⚠️  找不到配置檔: {args.scoreboard_config}")
-    
     output_root_abs = os.path.abspath(args.output_dir)
     os.makedirs(output_root_abs, exist_ok=True)
     normal_segments_dir = os.path.join(output_root_abs, "normal_segments")
@@ -149,17 +117,8 @@ def main():
     x2, y2, w2, h2 = SCORE_ROI_TEAM2
     cv2.rectangle(first_frame, (x2, y2), (x2 + w2, y2 + h2), (0, 0, 255), 2)
     cv2.putText(first_frame, 'Team2 ROI', (x2, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    
-    # 顯示 ROI 來源
-    cv2.putText(first_frame, f'ROI Source: {roi_source}', (10, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    print("\n--- ROI 預覽 ---")
-    print(f"ROI 來源: {roi_source}")
-    print(f"Team1: (x={x1}, y={y1}, w={w1}, h={h1})")
-    print(f"Team2: (x={x2}, y={y2}, w={w2}, h={h2})")
-    print("請檢查 Team1 (綠色) 與 Team2 (紅色) 的框是否正確。")
-    print("確認後，關閉圖片視窗即可繼續執行...")
+    print("\n--- ROI 預覽 ---"); print("請檢查 Team1 (綠色) 與 Team2 (紅色) 的框是否正確。"); print("確認後，關閉圖片視窗即可繼續執行...")
     cv2.imshow('ROI Preview - Press any key to continue', first_frame); cv2.waitKey(0); cv2.destroyAllWindows()
     
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
