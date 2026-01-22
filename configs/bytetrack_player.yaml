@@ -1,0 +1,21 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# ByteTrack 追蹤器配置 - 針對球員追蹤優化
+
+# 追蹤器類型
+tracker_type: bytetrack
+
+# ByteTrack 核心參數 - 針對球員(運動較慢)調整
+track_high_thresh: 0.4      # 球員通常較易辨識,可稍微降低
+track_low_thresh: 0.15      # 允許較低置信度恢復追蹤(遮擋情況)
+new_track_thresh: 0.5       # 新球員進入場地的閾值
+track_buffer: 50            # 更長的緩衝時間 - 允許球員被遮擋更久
+match_thresh: 0.7           # 稍低的匹配閾值 - 球員外觀變化較大
+
+# 進階參數
+min_box_area: 500           # 球員邊界框通常較大
+mot20: False
+
+# 說明:
+# - track_buffer=50: 允許球員長時間被球網/其他球員遮擋
+# - match_thresh=0.7: 考慮球員姿態變化、角度變化等因素
+# - min_box_area=500: 過濾遠端小目標,專注近端球員

@@ -8,10 +8,10 @@ from ultralytics import YOLO
 # ====== 配置部分 ======
 # ✨ ---【核心修改】--- ✨
 # 預訓練權重文件，請務必使用您現有的模型，而不是從頭開始！
-base_weights    = 'models/ball_best.pt' # <--- 修改這裡，指向您現有的球模型
+base_weights    = 'D:/Github/beach-volleyball-tracker/models/ball_best.pt' # <--- 修改這裡，指向您現有的球模型
 
 # 資料集配置文件，指向您剛剛準備好的微調資料集
-data_yaml       = 'D:/Github/beach-volleyball-tracker/dataset/finntunning_vollyball_123.v2i.yolov8/data.yaml' # <--- 修改這裡
+data_yaml       = 'D:\Github/beach-volleyball-tracker/dataset/finntunning_vollyball_123.v3i.yolov11/data.yaml' # <--- 修改這裡
 
 # 訓練參數
 epochs          = 30                          # ✨ 微調通常不需要太多輪，25-50輪即可
