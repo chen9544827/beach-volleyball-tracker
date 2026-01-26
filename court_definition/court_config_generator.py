@@ -1,4 +1,12 @@
-# court_definition/court_config_generator.py (修復版)
+# court_definition/court_config_generator.py
+# -*- coding: utf-8 -*-
+"""
+互動式設定沙灘排球場地邊界、排除區等。
+
+如果出現 GUI 錯誤，請執行：
+    pip uninstall opencv-python-headless
+    pip install opencv-python
+"""
 
 import cv2
 import numpy as np
@@ -6,6 +14,19 @@ import json
 import argparse
 import os
 import sys
+
+# 檢查 OpenCV GUI 支援
+def check_opencv_gui():
+    """檢查 OpenCV 是否支援 GUI"""
+    try:
+        # 嘗試建立一個小視窗
+        test_img = np.zeros((100, 100, 3), dtype=np.uint8)
+        cv2.imshow("test", test_img)
+        cv2.waitKey(1)
+        cv2.destroyAllWindows()
+        return True
+    except cv2.error:
+        return False
 
 # --- 全域變數 ---
 g_points = []
@@ -86,6 +107,20 @@ def get_point_from_user(base_frame, prompt):
 def main(video_path, config_save_path):
     global g_final_config
 
+    # 檢查 GUI 支援
+    if not check_opencv_gui():
+        print("="*60)
+        print("錯誤：OpenCV 沒有 GUI 支援！")
+        print("="*60)
+        print()
+        print("請執行以下指令修復：")
+        print()
+        print("  pip uninstall opencv-python-headless -y")
+        print("  pip install opencv-python")
+        print()
+        print("="*60)
+        sys.exit(1)
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"錯誤：無法開啟影片 '{video_path}'")
@@ -96,7 +131,8 @@ def main(video_path, config_save_path):
         print("錯誤：無法讀取影片的第一幀。")
         return
 
-    cv2.namedWindow(g_window_name)
+    cv2.namedWindow(g_window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(g_window_name, 1280, 720)
 
     # 1. 定義場地邊界
     print("步驟 1/4: 定義場地邊界 (左上 -> 左下 -> 右下 -> 右上)")
@@ -109,15 +145,16 @@ def main(video_path, config_save_path):
     # 2. 定義排除區域
     current_drawing_frame = base_frame_with_boundary.copy()
     while True:
-        print("\n步驟 2/4: 定義球員排除區 (可選)")
+        print("\n步驟 2/4: 定義球員排除區 (可選) - 框選裁判站的位置")
         cv2.putText(current_drawing_frame, "Add exclusion zone? 'a': Add, 'n': Next, 'q': Quit", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (50, 50, 255), 2)
         cv2.imshow(g_window_name, current_drawing_frame)
         key = cv2.waitKey(0) & 0xFF
         if key == ord('a'):
             exclusion_points = get_polygon_from_user(current_drawing_frame, 'Exclusion Zone', 3, 20)
             if exclusion_points:
-                 g_final_config["exclusion_zones"].append(exclusion_points)
+                 g_final_config["exclusion_zones"].append({"polygon": exclusion_points})
                  cv2.polylines(current_drawing_frame, [np.array(exclusion_points)], True, (0, 0, 255), 2)
+                 print(f"  ✅ 已新增排除區域 #{len(g_final_config['exclusion_zones'])}")
         elif key == ord('n'): break
         elif key == ord('q'): print("使用者取消操作，定義終止。"); cv2.destroyAllWindows(); return
     
@@ -154,7 +191,7 @@ def main(video_path, config_save_path):
     except Exception as e:
         print(f"\n錯誤：儲存設定檔失敗：{e}")
 
-# --- ✨ 核心修復: 補上執行入口 ---
+# --- 執行入口 ---
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="互動式設定沙灘排球場地邊界、排除區等。")
     parser.add_argument("--video_path", type=str, required=True, help="用於標示的範例影片路徑。")

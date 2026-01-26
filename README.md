@@ -1,168 +1,395 @@
-# 沙灘排球影片分析專案 (Beach Volleyball Tracker)
+# Beach Volleyball Tracker 🏐
 
-## 專案總覽
+沙灘排球影片分析系統 - 自動追蹤球、偵測發球事件、識別發球員
 
-本專案旨在全自動化分析沙灘排球比賽影片，透過物件偵測 (YOLOv8) 和先進的電腦視覺演算法，實現以下核心目標：
+## 功能概述
 
-1.  **自動偵測發球事件**：採用基於狀態機的時序分析，精準識別每一次發球的瞬間，有效過濾比賽中的其他擊球干擾。
-2.  **鎖定發球員與分析發球類型**：準確判斷執行發球的球員，並透過姿態辨識 (Pose Estimation) 技術，進一步分析其為「**跳躍發球**」或「**站立發球**」。
-3.  **分析發球戰術區域**：將發球員的位置對應到球場上的 A, B, C 三個戰術區域。
-
-此工具為教練、球員及數據分析師提供了一套強大的量化分析方法，能夠從大量的影片中快速、自動化地提取關鍵的戰術數據，並以結構化的 CSV 格式匯出，方便後續的統計與研究。
-
----
-
-## 核心功能
-
-* **高準確度的發球判斷**：採用基於「拋球 -> 頂點 -> 擊球」動作序列的狀態機演算法，能有效過濾非發球的高速擊球事件。
-* **發球類型智慧分析**：整合 YOLOv8-Pose 模型，透過分析發球球員在擊球前的臀部關鍵點位移，自動判斷該次發球為「跳躍發球」還是「站立發球」。
-* **精準的發球員識別**：在偵測到拋球的瞬間，鎖定離球最近的球員，從源頭上確保發球員判斷的準確性。
-* **進階的場地自訂功能**：提供互動式工具，不僅能定義球場四角，還能設定**排除區域**（如場邊教練席）和**背景球過濾區**（如遠方觀眾席的球），大幅提升偵測準確性。
-* **自動化報告生成與管理**：
-    * 每次批次分析後，會自動生成包含發球區域和類型的 `analysis_summary.csv` 報告。
-    * 所有批次的 CSV 報告會被**自動加上時間戳並存檔**至 `csv_reports_archive/` 資料夾，確保歷史紀錄永不遺失。
-    * 提供獨立腳本，可**一鍵合併**所有歷史存檔，生成一份最終的總報告 `MASTER_REPORT.csv`。
-* **強大的批次與平行處理**：支援一次處理資料夾中的多個影片，並能利用多核心 CPU 平行運算以顯著提升分析效率。
-* **視覺化的偵錯中心**：自動將所有偵測到的發球事件前後的關鍵畫面（共7幀）集中儲存到 `key_frames_for_review/` 資料夾，方便使用者快速、直觀地驗證和檢視分析結果。
+| 功能 | 說明 | 狀態 |
+|------|------|------|
+| 球追蹤 | 使用 YOLO 模型追蹤排球位置 | ✅ 完成 |
+| 球員偵測 | 偵測球員位置和骨架姿態 | ✅ 完成 |
+| 場地設定 | 互動式設定場地邊界、排除區域 | ✅ 完成 |
+| 發球偵測 | 識別發球事件（拋球→擊球） | ✅ 完成 |
+| 發球員識別 | 判斷是哪位球員發球（Lookback 方法） | ✅ 完成 |
+| 批次處理 | 批次追蹤和分析多個影片 | ✅ 完成 |
+| 跳發偵測 | 判斷發球是否為跳發 | 🚧 待開發 |
 
 ---
 
-## 安裝與需求
+## 專案結構
 
-1.  **Python 環境**: 建議使用 Python 3.8 或更高版本。
-
-2.  **安裝相依套件**: 專案已包含 `requirements.txt` 檔案。請透過以下指令一鍵安裝所有必要的函式庫：
-    ```bash
-    pip install -r requirements.txt
-    ```
-    這會安裝 `ultralytics`, `opencv-python`, `numpy`, `torch`, `tqdm` 等核心套件。
-
-3.  **模型檔案**:
-    * 請確保您的物件偵測模型已放置在專案根目錄下的 `models/` 資料夾中。
-    * **球員與姿態偵測模型**: `yolov8s-pose.pt`
-    * **排球偵測模型**: `ball_best.pt`
-    * 如果 `models/` 資料夾不存在，請手動建立。
-
----
-
-## 使用教學 (完整工作流程)
-
-本專案的使用流程設計得非常有彈性，您可以根據需求選擇執行全部或部分步驟。
-
-### **第零步 (可選)：自動切割長影片**
-
-如果您的原始檔是完整的比賽錄影，可以使用此工具，根據分數變化自動將其切割成「一分一回合」的短影片片段。
-
-1.  **調整 ROI**: 打開 `video_processing/video_slicer_by_score.py` 腳本，修改 `SCORE_ROI_TEAM1` 和 `SCORE_ROI_TEAM2` 的 `(x, y, w, h)` 座標，使其精準框住影片中的兩隊分數區域。
-2.  **執行切割**:
-    ```bash
-    python video_processing/video_slicer_by_score.py --input "path/to/your/long_match.mp4" --output_dir "output_data/video_segments"
-    ```
-    切割後的影片會依據得分方自動命名，並產生一份 `slicing_summary.csv` 報告。
-
-### **第一步：定義球場邊界 (只需對同類視角做一次)**
-
-這是讓程式能夠進行戰術區域分析的**必要步驟**。
-
-1.  **執行設定檔產生器**:
-    ```bash
-    python court_definition/court_config_generator.py --video_path "path/to/your/sample_video.mp4"
-    ```
-2.  **互動式標示**:
-    * 程式會顯示影片的第一幀畫面。
-    * **標示球場角落**: **務必依照 `左上 -> 左下 -> 右下 -> 右上` 的順序**，用滑鼠左鍵點擊球場的四個角落。這個順序對後續的區域判斷至關重要。
-    * **(可選) 標示排除區**: 按 `a` 鍵，可以定義不想偵測球員的區域（例如裁判席），可定義多個。
-    * **(可選) 標示背景球過濾區**: 按 `a` 鍵，可以定義可能出現干擾球的背景區域（例如觀眾席），可定義多個。
-    * 完成所有標示後，按 `q` 鍵退出。
-3.  **產生設定檔**: 腳本會在專案根目錄下產生一個名為 `court_config.json` 的檔案。
-
-### **第二步：執行主分析程式 (可分批執行)**
-
-這是分析所有影片並產生結果的核心步驟。
-
-1.  **基本執行指令**:
-    ```bash
-    python run_analysis_all_in_one.py --input_folder "包含影片片段的資料夾" --court_config "court_config.json" --workers 4
-    ```
-2.  **執行完畢**:
-    * 當次執行的 CSV 結果會被自動加上時間戳，存檔至根目錄下的 `csv_reports_archive/` 資料夾。
-    * 所有偵測到的關鍵幀會被集中存放到 `volleyball_analysis_results/key_frames_for_review/` 資料夾。
-
-### **第三步 (可選)：整合所有歷史報告**
-
-當您分批執行了多次分析後，可以使用此腳本將所有存檔的 CSV 報告合併成一份總報告。
-
-1.  **執行整合腳本**:
-    ```bash
-    python combine_csv_reports.py
-    ```
-2.  **取得總報告**: 腳本會在根目錄下產生一個名為 `MASTER_REPORT.csv` 的檔案，這就是包含所有歷史分析結果的總數據。
+```
+beach-volleyball-tracker/
+├── core/                              # 核心模組
+│   ├── __init__.py
+│   ├── ball_tracker.py                # 球追蹤器（YOLO + 軌跡預測）
+│   ├── serve_detector.py              # 發球偵測器（拋球→頂點→擊球）
+│   └── server_identifier.py           # 發球員識別（Lookback 方法）
+│
+├── video_processing/                  # 影片處理
+│   └── track_ball_and_player_v2.py    # 主要追蹤流程
+│
+├── court_definition/                  # 場地定義工具
+│   └── court_config_generator.py      # 互動式場地設定工具
+│
+├── batch_tracking.py                  # 批次追蹤腳本
+├── batch_test_serve.py                # 批次發球員識別腳本
+├── court_config.json                  # 場地設定檔（排除區域）
+│
+├── test_server_identification.py      # 發球員識別測試腳本
+├── visualize_tracking.py              # 追蹤結果視覺化工具
+├── diagnose_serve.py                  # 發球偵測診斷工具
+├── test_improvements.py               # 測試腳本
+│
+├── models/                            # YOLO 模型（需自行放置）
+│   ├── best.pt                        # 排球偵測模型
+│   └── yolov8x-pose.pt                # 球員姿態模型
+│
+├── input_video/                       # 輸入影片目錄
+├── test_output/                       # 追蹤輸出目錄（JSON）
+├── batch_test_output/                 # 發球員識別輸出目錄（圖片）
+└── README.md
+```
 
 ---
 
-## 命令列參數詳解 (`run_analysis_all_in_one.py`)
+## 安裝需求
 
-主程式提供豐富的參數來自訂分析流程。
+### Python 環境
+```bash
+Python 3.8+
+```
 
-| 參數名稱                   | 必要性 | 預設值                        | 說明                                                                               |
-| :------------------------- | :----: | :---------------------------- | :--------------------------------------------------------------------------------- |
-| `--input_folder`           | **必要** | -                             | 包含待分析影片的資料夾路徑。                                                       |
-| `--court_config`           |  建議  | -                             | 由第一步產生的 `court_config.json` 檔案路徑。若無則無法分析發球區域。              |
-| `--output_folder`          |  可選  | `volleyball_analysis_results` | 儲存所有分析結果（JSON, Log, 圖片）的根目錄。                                    |
-| `--reports_archive_folder` |  可選  | `csv_reports_archive`         | 儲存所有批次 CSV 報告的存檔資料夾。                                                |
-| `--workers`                |  可選  | `2`                           | 用於平行處理的 CPU 核心數量。                                                      |
-| `--overwrite`              |  可選  | `False`                       | 加上此旗標會強制重新分析所有影片，覆蓋舊結果。                                     |
-| `--hit_v`                  |  可選  | `40.0`                        | **(重要)** 偵測擊球的最小瞬時速度。                                                |
-| `--toss_vy`                |  可選  | `8.0`                         | 觸發「疑似拋球」的最小初始垂直向上速度。                                           |
-| `--min_hit_horizontal_ratio` |  可選  | `2.5`                         | **(重要)** 擊球時，水平速度必須是垂直速度的最小倍數，用以區分擊球與下墜。        |
-| `--search_offset`          |  可選  | `3`                           | 從初步偵測到的擊球幀，往前「回溯」幾幀來尋找發球員。                               |
-| `--ball_leave_threshold`   |  可選  | `30`                          | 用於精準校正擊球時間的球員與球的距離閾值（像素）。                                 |
-| `--jump_height_threshold`  |  可選  | `20`                          | 判定為「跳躍發球」的最小臀部垂直位移像素值。                                       |
-| *...其他偵測參數* |  可選  | (各自不同)                    | 其他用於微調發球狀態機的參數，如 `--max_frames_to_apex`, `--frames_to_validate` 等。 |
+### 安裝套件
+```bash
+pip install torch torchvision
+pip install ultralytics
+pip install opencv-python   # 注意：不是 opencv-python-headless
+pip install numpy
+```
 
----
-
-## 輸出結果說明
-
-分析完成後，所有的結果會分散儲存在專案目錄中，各司其職：
-
-* **`volleyball_analysis_results/`**: 這是主要的輸出根目錄。
-    * **`key_frames_for_review/`**: **(偵錯重點)** 集中存放所有偵測到的發球事件前後各3幀的圖片，方便快速預覽和驗證。
-    * **`final_summary_refined/`**: 存放**當次執行**的 `analysis_summary.csv` 和文字報告。
-    * **`[影片名稱]/`**: 每個影片都會有一個對應的子資料夾，存放最原始的追蹤數據 (`.json`) 和該影片獨立的關鍵幀。
-* **`csv_reports_archive/`**: **(數據重點)** 存放所有歷史批次的 CSV 分析報告，每個檔案都帶有唯一的時間戳。
-* **`MASTER_REPORT.csv`**: 執行 `combine_csv_reports.py` 後在根目錄生成的最終總報告。
+### YOLO 模型
+- 排球偵測模型：`models/best.pt`
+- 球員姿態模型：`models/yolov8x-pose.pt`
 
 ---
 
-## 其他工具與進階功能
+## 快速開始
 
-* **模型微調 (`model_training/Fine_tuning.py`)**:
-    如果模型在特定場景下對球的偵測效果不佳（例如背景干擾），您可以使用此腳本對 `ball_best.pt` 進行微調，以提升其在困難場景下的準確度。
+### 完整流程（三步驟）
 
-* **產生偵錯影片 (`video_processing/create_debug_video.py`)**:
-    這是一個強大的視覺化工具。它可以將追蹤腳本產生的 `.json` 數據（如球員框、球的位置、速度等）直接繪製回影片上，產生一個包含詳細偵錯資訊的新影片，對於理解和調整演算法非常有幫助。
+```bash
+# Step 1: 設定場地排除區域（只需執行一次）
+python court_definition/court_config_generator.py \
+    --video_path input_video/analyze_serve/segment_001.mp4 \
+    --output_path court_config.json
+
+# Step 2: 批次追蹤所有影片
+python batch_tracking.py \
+    --video-dir input_video/analyze_serve \
+    --output-dir test_output \
+    --court-config court_config.json
+
+# Step 3: 批次發球員識別
+python batch_test_serve.py \
+    --video-dir input_video/analyze_serve \
+    --json-dir test_output \
+    --output batch_test_output \
+    --court-config court_config.json
+```
 
 ---
 
-## 疑難排解 (Troubleshooting)
+## 詳細使用說明
 
-* **發球事件偵測不到或誤判**：
-    1.  首先檢查 `key_frames_for_review/` 中的偵錯圖片，確認問題所在。
-    2.  這是最常見的問題，通常需要微調**偵測參數**。請嘗試調整 `--hit_v` (例如從 `40` 降至 `35`) 或 `--min_hit_horizontal_ratio` (例如從 `2.5` 降至 `2.0`) 來放寬條件。
-    3.  反之，如果誤判太多，則應適度**調高**這些參數。
+### 1. 場地設定（court_config_generator.py）
 
-* **發球區域 (A/B/C) 判斷錯誤或皆為 "Unknown"**:
-    1.  確認您已透過 `--court_config` 參數指定了 `court_config.json` 檔案。
-    2.  確認您在執行 `court_config_generator.py` 時，點擊四個角落的**順序**是正確的 (`左上 -> 左下 -> 右下 -> 右上`)。
+互動式工具，用於定義：
+- 場地邊界
+- **排除區域**（裁判、工作人員、廣告區）
+- 網子位置
+- 背景球過濾區
 
-* **`csv_reports_archive` 資料夾沒有出現**:
-<<<<<<< HEAD
-<<<<<<< HEAD
-    * 這代表當次執行**沒有偵測到任何一個有效的發球事件**。請參考第一點來放寬您的偵測參數，直到能成功偵測到事件為止。
-=======
-    * 這代表當次執行**沒有偵測到任何一個有效的發球事件**。請參考第一點來放寬您的偵測參數，直到能成功偵測到事件為止。
->>>>>>> a8823508003322e205204ae00209e42d9aa388a2
-=======
-    * 這代表當次執行**沒有偵測到任何一個有效的發球事件**。請參考第一點來放寬您的偵測參數，直到能成功偵測到事件為止。
->>>>>>> 5f9c0434df068b4422b20c92cd9a58e3c4670c75
+```bash
+python court_definition/court_config_generator.py \
+    --video_path input_video/segment_001.mp4 \
+    --output_path court_config.json
+```
+
+**操作說明：**
+| 步驟 | 動作 | 按鍵 |
+|------|------|------|
+| 1 | 點擊場地四角（左上→左下→右下→右上） | 點擊後按 `q` 確認 |
+| 2 | 框選排除區域（裁判位置） | 按 `a` 新增，`q` 確認，`n` 下一步 |
+| 3 | 點擊網子位置 | 點擊後自動進入下一步 |
+| 4 | 框選背景球區域（可選） | 按 `a` 新增，`n` 完成 |
+
+**輸出檔案 (court_config.json)：**
+```json
+{
+    "court_boundary_polygon": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],
+    "exclusion_zones": [
+        {
+            "name": "右上角裁判區",
+            "polygon": [[1050,0], [1050,280], [1456,280], [1456,0]]
+        }
+    ],
+    "net_y": 280,
+    "background_ball_zones": []
+}
+```
+
+---
+
+### 2. 批次追蹤（batch_tracking.py）
+
+追蹤所有影片中的球和球員，輸出 JSON 檔案。
+
+```bash
+python batch_tracking.py \
+    --video-dir input_video/analyze_serve \
+    --output-dir test_output \
+    --court-config court_config.json
+```
+
+**參數說明：**
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--video-dir` | 影片目錄 | (必填) |
+| `--output-dir` | 輸出目錄 | (必填) |
+| `--court-config` | 場地設定 JSON | None |
+| `--detection-interval` | 偵測間隔（每 N 幀） | 1 |
+| `--max-occlusion` | 最大遮擋幀數 | 15 |
+| `--no-tracker` | 停用球追蹤器 | False |
+| `--quiet` | 安靜模式 | False |
+
+**輸出：**
+- `{video_name}_all_frames_data_with_pose.json` - 每個影片的追蹤數據
+
+---
+
+### 3. 批次發球員識別（batch_test_serve.py）
+
+分析追蹤數據，識別發球員。
+
+```bash
+python batch_test_serve.py \
+    --video-dir input_video/analyze_serve \
+    --json-dir test_output \
+    --output batch_test_output \
+    --court-config court_config.json
+```
+
+**參數說明：**
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--video-dir` | 影片目錄 | (必填) |
+| `--json-dir` | JSON 追蹤數據目錄 | (必填) |
+| `--output` | 輸出目錄 | batch_test_output |
+| `--court-config` | 場地設定 JSON | None |
+| `--no-images` | 不儲存圖片 | False |
+| `--verbose` | 詳細模式 | False |
+
+**輸出：**
+- `{video_name}_server_FOUND.jpg` - 找到球員與球重疊的幀（**判斷依據**）
+- `{video_name}_server_TOSS.jpg` - 拋球幀（參考）
+- `{video_name}_server_HIT.jpg` - 擊球幀（參考）
+
+---
+
+## 核心演算法
+
+### 發球員識別 - Lookback 方法
+
+**問題**：在拋球幀或擊球幀時，球可能已經離開球員手中，難以判斷誰是發球員。
+
+**解決方案**：從拋球幀**往回找**，直到找到球員與球**重疊**（距離 < 100 像素）的幀。
+
+```
+拋球幀 (frame 344)
+    ↓
+檢查：有球員與球重疊嗎？→ 沒有
+    ↓
+往回一幀 (frame 343)
+    ↓
+檢查：有球員與球重疊嗎？→ 沒有
+    ↓
+... 重複 ...
+    ↓
+找到！frame 310 有球員與球重疊
+    ↓
+該球員 = 發球員 ✅
+```
+
+**排除區域**：裁判、工作人員等會被排除，不會被誤判為發球員。
+
+---
+
+### 發球偵測流程
+
+```
+球軌跡分析
+    ↓
+偵測拋球（球向上移動，vy > 8）
+    ↓
+偵測頂點（球開始向下）
+    ↓
+偵測擊球（速度 > 40，水平移動）
+    ↓
+輸出發球事件
+```
+
+---
+
+## JSON 數據格式
+
+### 追蹤數據 (`*_all_frames_data_with_pose.json`)
+
+```json
+{
+  "metadata": {
+    "video_path": "input_video/segment_029.mp4",
+    "total_frames": 744,
+    "fps": 25.0
+  },
+  "frames": [
+    {
+      "frame_id": 0,
+      "ball_detections": [
+        {
+          "box_coords": [650, 280, 680, 310],
+          "confidence": 0.85,
+          "center_point": [665, 295],
+          "is_in_background_zone": false
+        }
+      ],
+      "player_detections": [
+        {
+          "box_coords": [600, 400, 700, 700],
+          "confidence": 0.92,
+          "center_point": [650, 550],
+          "pose_keypoints": [[x, y, conf], ...]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 骨架關鍵點 (COCO 17-point)
+
+| Index | 關鍵點 | 用途 |
+|-------|--------|------|
+| 0 | 鼻子 | - |
+| 5, 6 | 左/右肩 | 身體位置 |
+| 7, 8 | 左/右肘 | 手臂動作 |
+| 9, 10 | 左/右手腕 | **發球判斷** |
+| 11, 12 | 左/右髖 | 身體位置 |
+| 13, 14 | 左/右膝 | 跳發偵測 |
+| 15, 16 | 左/右腳踝 | **跳發偵測** |
+
+---
+
+## 輸出圖片說明
+
+### FOUND 幀（判斷依據）
+- 顯示找到球員與球重疊的幀
+- 綠色框 = 發球員
+- 藍色框 = 其他球員
+- 黃色圈 = 球
+- 紫色框 = 排除區域
+
+### TOSS / HIT 幀（參考）
+- 顯示拋球幀和擊球幀
+- 用於驗證發球員識別結果
+
+---
+
+## 診斷工具
+
+### 發球偵測診斷
+
+```bash
+python diagnose_serve.py \
+    --input test_output/segment_029_all_frames_data_with_pose.json
+```
+
+**輸出：**
+- 軌跡統計（偵測率、速度分佈）
+- 潛在拋球序列
+- 高速事件列表
+- 參數調整建議
+
+---
+
+## 參數調整
+
+### 發球偵測參數
+
+```python
+config = {
+    'hit_v': 40.0,              # 擊球速度閾值
+    'toss_vy': 8.0,             # 拋球垂直速度閾值
+}
+```
+
+**調整建議：**
+- 漏偵測發球 → 降低 `hit_v`
+- 誤判太多 → 提高 `hit_v`
+- 拋球偵測不穩 → 調整 `toss_vy`
+
+### 發球員識別參數
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `overlap_threshold` | 球員與球重疊的距離閾值 | 100 像素 |
+| `max_lookback` | 最多往回找幾幀 | 90 幀 |
+
+---
+
+## 已知限制
+
+1. **網子遮擋**：對面場地的球員可能被網子遮擋，導致偵測不到
+2. **快速移動**：極快的發球可能追蹤跳幀
+3. **多球干擾**：畫面中有多顆球可能干擾
+4. **攝影機角度**：不同角度需要重新設定排除區域
+
+---
+
+## 待開發功能
+
+- [ ] 跳發偵測（分析腳踝位置變化）
+- [ ] 發球落點預測
+- [ ] 發球速度估算（需要場地校準）
+- [ ] GUI 介面
+- [ ] 即時分析模式
+
+---
+
+## 更新日誌
+
+### v2.0 (2025-01-26)
+- ✅ 新增 Lookback 方法識別發球員
+- ✅ 新增場地排除區域功能
+- ✅ 新增批次追蹤腳本 (batch_tracking.py)
+- ✅ 新增批次發球員識別腳本 (batch_test_serve.py)
+- ✅ 新增場地設定工具 (court_config_generator.py)
+- ✅ 輸出圖片顯示排除區域
+
+### v1.0 (2025-01-23)
+- ✅ 基本球追蹤功能
+- ✅ 球員姿態偵測
+- ✅ 發球偵測（拋球→擊球）
+- ✅ 基本發球員識別
+
+---
+
+## License
+
+MIT License
+
+---
+
+## 聯絡方式
+
+如有問題或建議，請開 Issue 或聯繫作者。
