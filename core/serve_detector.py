@@ -395,7 +395,7 @@ def analyze_serve_events_v2(
             # 如果只需要第一個事件，記錄後停止
             if first_only and first_event is None:
                 first_event = event
-                print(f"{log_prefix}  ✓ 已找到第一個發球事件，停止搜尋")
+                print(f"{log_prefix}  [OK] 已找到第一個發球事件，停止搜尋")
                 break
     
     if first_only:

@@ -22,21 +22,71 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.serve_detector import analyze_serve_events_v2
 from core.server_identifier import analyze_serve_player, get_keypoint
+from core.jump_serve_detector import classify_serve_type
+from core.data_validator import DataValidator, safe_load_json, validate_center_point
+from core.error_messages import ValidationError, format_error
+import logging
+
+# 設定日誌
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 
 
 def load_tracking_data(json_path: str) -> dict:
-    """載入追蹤數據"""
-    with open(json_path, 'r') as f:
-        data = json.load(f)
+    """
+    載入追蹤數據並驗證
+
+    Args:
+        json_path: JSON 檔案路徑
+
+    Returns:
+        追蹤資料字典
+
+    Raises:
+        ValidationError: 當檔案載入失敗或資料驗證失敗時
+    """
+    # 安全載入 JSON
+    data, error = safe_load_json(json_path)
+    if error:
+        raise ValidationError(f"載入 JSON 失敗: {error}")
+
+    # 驗證資料結構
+    validator = DataValidator(verbose=False)
+    is_valid, errors = validator.validate_tracking_json(data)
+
+    if not is_valid:
+        error_msg = f"資料驗證失敗:\n  - " + "\n  - ".join(errors)
+        raise ValidationError(error_msg)
+
     return data
 
 
 def load_court_config(config_path: str) -> dict:
-    """載入場地設定（包含排除區域）"""
-    if config_path and os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    return None
+    """
+    載入場地設定（包含排除區域）
+
+    Args:
+        config_path: 場地設定檔路徑
+
+    Returns:
+        場地設定字典，失敗時返回 None
+    """
+    if not config_path or not os.path.exists(config_path):
+        logging.warning(f"找不到場地設定檔: {config_path}")
+        return None
+
+    data, error = safe_load_json(config_path)
+    if error:
+        logging.error(f"載入場地設定失敗: {error}")
+        return None
+
+    # 驗證場地設定結構
+    validator = DataValidator(verbose=False)
+    is_valid, errors = validator.validate_court_config(data)
+    if not is_valid:
+        logging.error(f"場地設定驗證失敗: {', '.join(errors)}")
+        return None
+
+    return data
 
 
 def get_frame_by_id(frames_data: list, frame_id: int) -> dict:
@@ -47,7 +97,7 @@ def get_frame_by_id(frames_data: list, frame_id: int) -> dict:
     return None
 
 
-def draw_serve_analysis(frame, frame_data, ball_position, server_result, frame_label="", is_reference=False, exclusion_zones=None):
+def draw_serve_analysis(frame, frame_data, ball_position, server_result, frame_label="", is_reference=False, exclusion_zones=None, jump_result=None):
     """在影格上繪製發球分析結果
     
     注意：使用發球員的座標範圍來匹配，而非 index（因為每幀的球員順序可能不同）
@@ -80,24 +130,29 @@ def draw_serve_analysis(frame, frame_data, ball_position, server_result, frame_l
         cv2.putText(frame, "BALL", (x - 20, y - 25), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
     
-    players = frame_data.get('player_detections', [])
-    
+    # 驗證 frame_data 並取得球員資料
+    players = frame_data.get('player_detections', []) if frame_data else []
+
     # 取得 FOUND 幀中發球員的座標（用於跨幀匹配）
     server_info = server_result.get('server')
     server_center = None
     if server_info:
-        server_center = server_info.get('center_point')
-    
+        server_center = validate_center_point(server_info.get('center_point'))
+
     # 找出當前幀中最接近發球員位置的球員
     matched_server_idx = None
+    matched_server_player = None
     if server_center:
         min_dist = float('inf')
         for i, player in enumerate(players):
-            center = player.get('center_point', [0, 0])
+            center = validate_center_point(player.get('center_point'))
+            if not center:
+                continue
             dist = ((center[0] - server_center[0])**2 + (center[1] - server_center[1])**2)**0.5
             if dist < min_dist and dist < 150:  # 150 像素內才算匹配
                 min_dist = dist
                 matched_server_idx = i
+                matched_server_player = player
     
     for i, player in enumerate(players):
         box = player.get('box_coords')
@@ -122,12 +177,58 @@ def draw_serve_analysis(frame, frame_data, ball_position, server_result, frame_l
             cv2.circle(frame, (int(left_wrist[0]), int(left_wrist[1])), 8, (0, 0, 255), -1)
         if right_wrist:
             cv2.circle(frame, (int(right_wrist[0]), int(right_wrist[1])), 8, (0, 0, 255), -1)
+        
+        # 繪製腳踝位置（如果是發球員）
+        if i == matched_server_idx:
+            left_ankle = get_keypoint(player, 15)
+            right_ankle = get_keypoint(player, 16)
+            if left_ankle:
+                cv2.circle(frame, (int(left_ankle[0]), int(left_ankle[1])), 8, (0, 165, 255), -1)  # 橘色
+            if right_ankle:
+                cv2.circle(frame, (int(right_ankle[0]), int(right_ankle[1])), 8, (0, 165, 255), -1)
     
     # 如果發球員在當前幀沒有被偵測到，顯示其 FOUND 幀的位置
     if matched_server_idx is None and server_center:
         cv2.circle(frame, (int(server_center[0]), int(server_center[1])), 30, (0, 255, 0), 3)
         cv2.putText(frame, "SERVER (not detected)", (int(server_center[0]) - 80, int(server_center[1]) - 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    
+    # 在右上角顯示大型跳發/站發標籤
+    if jump_result:
+        serve_type = jump_result.get('serve_type', 'unknown')
+        jump_height = jump_result.get('jump_height', 0)
+        
+        if serve_type == 'jump':
+            # 跳發 - 黃底黑字
+            label = "JUMP SERVE"
+            bg_color = (0, 255, 255)  # 黃色
+            text_color = (0, 0, 0)    # 黑色
+        else:
+            # 站發 - 灰底白字
+            label = "STANDING"
+            bg_color = (128, 128, 128)  # 灰色
+            text_color = (255, 255, 255)  # 白色
+        
+        # 計算標籤位置（右上角）
+        label_x = width - 250
+        label_y = 30
+        
+        # 繪製背景矩形
+        (text_w, text_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)
+        cv2.rectangle(frame, 
+                      (label_x - 10, label_y - text_h - 10),
+                      (label_x + text_w + 10, label_y + baseline + 10),
+                      bg_color, -1)
+        
+        # 繪製文字
+        cv2.putText(frame, label, (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, text_color, 3)
+        
+        # 如果是跳發，顯示跳躍高度
+        if serve_type == 'jump':
+            height_text = f"Height: {jump_height:.0f}px"
+            cv2.putText(frame, height_text, (label_x, label_y + 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
     info_lines = [
         f"{frame_label}",
@@ -176,14 +277,26 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
     }
     
     try:
-        # 載入追蹤數據
+        # 載入追蹤數據（包含驗證）
         data = load_tracking_data(json_path)
         frames_data = data.get('frames', [])
-        
+
         if not frames_data:
             result['status'] = 'no_frames'
             result['error'] = 'JSON 中沒有幀資料'
             return result
+
+    except ValidationError as e:
+        result['status'] = 'error'
+        result['error'] = str(e)
+        return result
+
+    except Exception as e:
+        result['status'] = 'error'
+        result['error'] = f"載入資料時發生未預期的錯誤: {str(e)}"
+        return result
+
+    try:
         
         # 發球偵測
         serve_events = analyze_serve_events_v2(
@@ -225,6 +338,21 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         result['frames_searched'] = server_result.get('frames_searched', 0)
         result['status'] = 'success'
         
+        # 跳發偵測
+        jump_result = classify_serve_type(
+            frames_data=frames_data,
+            serve_event=serve_event,
+            server_result=server_result,
+            court_config=court_config,
+            verbose=verbose
+        )
+        
+        result['serve_type'] = jump_result.get('serve_type', 'unknown')
+        result['is_jump_serve'] = jump_result.get('is_jump_serve', False)
+        result['jump_confidence'] = jump_result.get('confidence', 0)
+        result['jump_height'] = jump_result.get('jump_height', 0)
+        result['ground_y'] = jump_result.get('ground_y')
+        
         # 儲存圖片
         if save_images:
             if cap.isOpened():
@@ -243,7 +371,8 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
                                 ball_position,
                                 server_result,
                                 f"FOUND Frame {found_frame_id} (searched back {server_result.get('frames_searched', 0)} frames)",
-                                exclusion_zones=court_config.get('exclusion_zones') if court_config else None
+                                exclusion_zones=court_config.get('exclusion_zones') if court_config else None,
+                                jump_result=jump_result
                             )
                             output_path = os.path.join(output_dir, f"{video_name}_server_FOUND.jpg")
                             cv2.imwrite(output_path, frame)
@@ -264,7 +393,8 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
                                 server_result,
                                 f"TOSS Frame {toss_frame_id}",
                                 is_reference=True,
-                                exclusion_zones=court_config.get('exclusion_zones') if court_config else None
+                                exclusion_zones=court_config.get('exclusion_zones') if court_config else None,
+                                jump_result=jump_result
                             )
                             output_path = os.path.join(output_dir, f"{video_name}_server_TOSS.jpg")
                             cv2.imwrite(output_path, frame)
@@ -282,7 +412,8 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
                                 server_result,
                                 f"HIT Frame {hit_frame_id}",
                                 is_reference=True,
-                                exclusion_zones=court_config.get('exclusion_zones') if court_config else None
+                                exclusion_zones=court_config.get('exclusion_zones') if court_config else None,
+                                jump_result=jump_result
                             )
                             output_path = os.path.join(output_dir, f"{video_name}_server_HIT.jpg")
                             cv2.imwrite(output_path, frame)
@@ -291,7 +422,9 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         
     except Exception as e:
         result['status'] = 'error'
-        result['error'] = str(e)
+        # 清理錯誤訊息中的無法編碼字符
+        error_str = str(e).encode('cp950', errors='replace').decode('cp950')
+        result['error'] = error_str
     
     return result
 
@@ -371,7 +504,7 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
     matches = find_matching_files(video_dir, json_dir)
     
     if not matches:
-        print("❌ 找不到匹配的影片和 JSON 檔案！")
+        print("[ERROR] 找不到匹配的影片和 JSON 檔案！")
         print(f"   請確認：")
         print(f"   - 影片目錄中有 .mp4 檔案")
         print(f"   - JSON 目錄中有對應的 *_all_frames_data_with_pose.json 檔案")
@@ -397,13 +530,19 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
         if result['status'] == 'success':
             found = result.get('found_frame', 'N/A')
             searched = result.get('frames_searched', 0)
-            print(f"    ✅ 找到幀: {found} (往回 {searched} 幀), "
+            serve_type = result.get('serve_type', 'unknown')
+            serve_emoji = '[JUMP]' if serve_type == 'jump' else '[STAND]'
+            print(f"    [SUCCESS] 找到幀: {found} (往回 {searched} 幀), "
                   f"發球員: Player {result['server_index']}, "
-                  f"信心度: {result['confidence']:.2f}")
+                  f"信心度: {result['confidence']:.2f}, "
+                  f"{serve_emoji} {serve_type}")
         elif result['status'] == 'no_serve':
-            print(f"    ⚠️ 未偵測到發球")
+            print(f"    [WARNING] 未偵測到發球")
         else:
-            print(f"    ❌ 錯誤: {result.get('error', result['status'])}")
+            error_msg = str(result.get('error', result['status']))
+            # 移除無法編碼的字符
+            error_msg = error_msg.encode('cp950', errors='replace').decode('cp950')
+            print(f"    [ERROR] 錯誤: {error_msg}")
     
     # 統計結果
     print()
@@ -417,9 +556,9 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
     errors = sum(1 for r in results if r['status'] == 'error')
     
     print(f"總計: {total} 個影片")
-    print(f"  ✅ 成功偵測: {success} ({success/total*100:.1f}%)")
-    print(f"  ⚠️ 未偵測到發球: {no_serve} ({no_serve/total*100:.1f}%)")
-    print(f"  ❌ 錯誤: {errors} ({errors/total*100:.1f}%)")
+    print(f"  [SUCCESS] 成功偵測: {success} ({success/total*100:.1f}%)")
+    print(f"  [WARNING] 未偵測到發球: {no_serve} ({no_serve/total*100:.1f}%)")
+    print(f"  [ERROR] 錯誤: {errors} ({errors/total*100:.1f}%)")
     
     # 信心度統計
     confidences = [r['confidence'] for r in results if r['status'] == 'success']
@@ -430,6 +569,21 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
         print(f"  最高: {max(confidences):.2f}")
         print(f"  最低: {min(confidences):.2f}")
     
+    # 跳發統計
+    jump_serves = [r for r in results if r.get('is_jump_serve', False)]
+    standing_serves = [r for r in results if r['status'] == 'success' and not r.get('is_jump_serve', False)]
+    
+    print()
+    print(f"發球類型統計:")
+    print(f"  [JUMP] 跳發 (Jump Serve): {len(jump_serves)} ({len(jump_serves)/max(1,success)*100:.1f}%)")
+    print(f"  [STAND] 站發 (Standing Serve): {len(standing_serves)} ({len(standing_serves)/max(1,success)*100:.1f}%)")
+    
+    if jump_serves:
+        jump_heights = [r.get('jump_height', 0) for r in jump_serves]
+        print(f"  跳發高度:")
+        print(f"    平均: {sum(jump_heights)/len(jump_heights):.1f} 像素")
+        print(f"    最高: {max(jump_heights):.1f} 像素")
+    
     # 儲存結果到 JSON
     summary = {
         'test_time': datetime.now().isoformat(),
@@ -439,6 +593,8 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
         'success': success,
         'no_serve': no_serve,
         'errors': errors,
+        'jump_serves': len(jump_serves),
+        'standing_serves': len(standing_serves),
         'results': results
     }
     
@@ -456,9 +612,9 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
         print("需要人工檢查的影片:")
         for r in need_check:
             if r['status'] == 'success':
-                print(f"  ⚠️ {r['video_name']}: 信心度低 ({r['confidence']:.2f})")
+                print(f"  [WARNING] {r['video_name']}: 信心度低 ({r['confidence']:.2f})")
             else:
-                print(f"  ❌ {r['video_name']}: {r['status']}")
+                print(f"  [ERROR] {r['video_name']}: {r['status']}")
     
     print()
     print("="*70)

@@ -187,6 +187,20 @@ __pycache__/
 # VSCode 設定（如果你用 VSCode）
 .vscode/
 
-# Ralph AI 工具檔案
+# AI 工具配置檔案
 .ralph/
 cline_mcp_settings.json
+
+# Claude Code 計劃檔案
+.claude/plans/
+
+# 備份檔案
+*-backup-*.zip
+*-backup-*.7z
+
+# 驗證輸出
+verification_output/
+batch_test_output/
+
+# 暫存測試檔案
+nul

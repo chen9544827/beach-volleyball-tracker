@@ -20,14 +20,40 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
 from video_processing.track_ball_and_player_v2 import run_tracking_v2
+from core.data_validator import safe_load_json, DataValidator
+import logging
+
+# 設定日誌
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 
 
 def load_court_config(config_path: str) -> dict:
-    """載入場地設定"""
-    if config_path and os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return None
+    """
+    載入場地設定（包含驗證）
+
+    Args:
+        config_path: 場地設定檔路徑
+
+    Returns:
+        場地設定字典，失敗時返回 None
+    """
+    if not config_path or not os.path.exists(config_path):
+        logging.warning(f"找不到場地設定檔: {config_path}")
+        return None
+
+    data, error = safe_load_json(config_path)
+    if error:
+        logging.error(f"載入場地設定失敗: {error}")
+        return None
+
+    # 驗證場地設定結構
+    validator = DataValidator(verbose=False)
+    is_valid, errors = validator.validate_court_config(data)
+    if not is_valid:
+        logging.error(f"場地設定驗證失敗: {', '.join(errors)}")
+        return None
+
+    return data
 
 
 def batch_tracking(
