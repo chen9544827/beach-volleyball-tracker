@@ -2,6 +2,8 @@
 import cv2
 import numpy as np
 import os
+import json
+import sys
 
 # --- ★★★★★ 在這裡修改您的測試參數 ★★★★★ ---
 
@@ -12,6 +14,7 @@ IMAGE_PATH_2 = "C:/Users/Aa954/Downloads/2.png"  # <<--- 修改這裡
 
 # 2. 精確定義兩個分數的ROI座標 (x, y, width, height)
 #    ★★ 這裡的座標必須和你 video_slicer_by_score.py 裡設定的完全一樣 ★★
+#    或者使用 --roi-config 參數載入 ROI 配置檔案
 SCORE_ROI_TEAM1 = (280, 29, 59, 51)  # 隊伍1/上方分數
 SCORE_ROI_TEAM2 = (287, 92, 59, 50)  # 隊伍2/下方分數
 
@@ -49,8 +52,43 @@ def preprocess_roi(roi_image):
     return gray_roi
 
 
+def load_roi_config(config_path):
+    """載入 ROI 配置檔案"""
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        roi1 = config['score_roi_team1']
+        roi2 = config['score_roi_team2']
+
+        team1_roi = (roi1['x'], roi1['y'], roi1['width'], roi1['height'])
+        team2_roi = (roi2['x'], roi2['y'], roi2['width'], roi2['height'])
+
+        print(f"[OK] 已載入 ROI 配置: {config_path}")
+        return team1_roi, team2_roi
+
+    except Exception as e:
+        print(f"[ERROR] 載入 ROI 配置失敗: {e}")
+        return None
+
+
 def main():
     print("--- ROI 差異分析工具 ---")
+
+    # 檢查命令列參數
+    roi_team1 = SCORE_ROI_TEAM1
+    roi_team2 = SCORE_ROI_TEAM2
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--roi-config":
+        if len(sys.argv) < 3:
+            print("[ERROR] 使用方式: python test_roi_diff_analyzer.py --roi-config <config_path>")
+            return
+        roi_result = load_roi_config(sys.argv[2])
+        if roi_result:
+            roi_team1, roi_team2 = roi_result
+        else:
+            print("[INFO] 使用預設 ROI 座標")
+
     image1 = cv2.imread(IMAGE_PATH_1)
     image2 = cv2.imread(IMAGE_PATH_2)
 
@@ -58,18 +96,19 @@ def main():
     if image2 is None: print(f"錯誤: 無法讀取圖片 '{IMAGE_PATH_2}'"); return
 
     print(f"比較圖片 1: '{os.path.basename(IMAGE_PATH_1)}'")
-    print(f"比較圖片 2: '{os.path.basename(IMAGE_PATH_2)}'\n")
+    print(f"比較圖片 2: '{os.path.basename(IMAGE_PATH_2)}'")
+    print(f"使用 ROI: Team1={roi_team1}, Team2={roi_team2}\n")
 
     # --- 處理隊伍1 ---
-    roi1_img1 = get_roi_from_image(image1, SCORE_ROI_TEAM1, IMAGE_PATH_1)
-    roi1_img2 = get_roi_from_image(image2, SCORE_ROI_TEAM1, IMAGE_PATH_2)
+    roi1_img1 = get_roi_from_image(image1, roi_team1, IMAGE_PATH_1)
+    roi1_img2 = get_roi_from_image(image2, roi_team1, IMAGE_PATH_2)
     processed_roi1_img1 = preprocess_roi(roi1_img1)
     processed_roi1_img2 = preprocess_roi(roi1_img2)
     sad_roi1 = calculate_sad(processed_roi1_img1, processed_roi1_img2)
 
     # --- 處理隊伍2 ---
-    roi2_img1 = get_roi_from_image(image1, SCORE_ROI_TEAM2, IMAGE_PATH_1)
-    roi2_img2 = get_roi_from_image(image2, SCORE_ROI_TEAM2, IMAGE_PATH_2)
+    roi2_img1 = get_roi_from_image(image1, roi_team2, IMAGE_PATH_1)
+    roi2_img2 = get_roi_from_image(image2, roi_team2, IMAGE_PATH_2)
     processed_roi2_img1 = preprocess_roi(roi2_img1)
     processed_roi2_img2 = preprocess_roi(roi2_img2)
     sad_roi2 = calculate_sad(processed_roi2_img1, processed_roi2_img2)

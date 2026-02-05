@@ -1,23 +1,75 @@
-# video_processing/video_slicer_by_score.py (v4 - 僅在超過閾值時顯示 SAD)
+# video_processing/video_slicer_by_score.py (v5 - 支援 ROI 配置檔案)
 import cv2
 import os
 import argparse
 import numpy as np
 import csv
+import json
 
 # --- 設定 ---
-# 這些 ROI 座標需要你根據你的影片手動調整
+# 預設 ROI 座標（若未指定配置檔案則使用此值）
 SCORE_ROI_TEAM1 = (280, 29, 59, 51)  # 隊伍1 (例如:上方/左方) 的分數區域 (x, y, w, h)
 SCORE_ROI_TEAM2 = (287, 92, 59, 50)  # 隊伍2 (例如:下方/右方) 的分數區域 (x, y, w, h)
+
+
+def load_roi_config(config_path):
+    """載入 ROI 配置檔案
+
+    Args:
+        config_path: ROI 配置 JSON 檔案路徑
+
+    Returns:
+        tuple: (team1_roi, team2_roi) 若成功，否則 None
+    """
+    if not config_path or not os.path.exists(config_path):
+        if config_path:
+            print(f"[WARNING] ROI 配置檔案不存在: {config_path}")
+        print(f"[INFO] 使用預設 ROI 座標")
+        return None
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        # 驗證必要欄位
+        if 'score_roi_team1' not in config or 'score_roi_team2' not in config:
+            print(f"[ERROR] ROI 配置格式錯誤: 缺少必要欄位")
+            return None
+
+        # 轉換為 tuple 格式 (x, y, w, h)
+        roi1 = config['score_roi_team1']
+        roi2 = config['score_roi_team2']
+
+        team1_roi = (roi1['x'], roi1['y'], roi1['width'], roi1['height'])
+        team2_roi = (roi2['x'], roi2['y'], roi2['width'], roi2['height'])
+
+        print(f"[OK] 已載入 ROI 配置: {config_path}")
+        print(f"     Team1 ROI: {team1_roi}")
+        print(f"     Team2 ROI: {team2_roi}")
+
+        return team1_roi, team2_roi
+
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] JSON 格式錯誤: {e}")
+        return None
+    except KeyError as e:
+        print(f"[ERROR] 配置欄位錯誤: 缺少 {e}")
+        return None
+    except Exception as e:
+        print(f"[ERROR] 載入 ROI 配置失敗: {e}")
+        return None
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="根據兩個獨立分數ROI的影像變化來分割影片，並判斷得分方。")
     parser.add_argument("--input", type=str, required=True, help="輸入的長時間影片檔案路徑")
     parser.add_argument("--output_dir", type=str, default="output_data/video_segments_with_score", help="儲存分割後影片片段與報告的根目錄")
+    parser.add_argument("--roi_config", type=str, default=None,
+                        help="ROI 配置 JSON 檔案路徑（若不指定則使用預設值）")
     parser.add_argument("--min_segment_duration", type=int, default=10, help="有效比賽片段的最小持續時間 (秒)")
     parser.add_argument("--long_segment_threshold", type=int, default=90, help="長片段的閾值 (秒)")
     parser.add_argument("--roi_check_interval", type=float, default=0.5, help="每隔多少秒檢查一次ROI變化 (秒)")
-    parser.add_argument("--diff_threshold", type=int, default=9000, 
+    parser.add_argument("--diff_threshold", type=int, default=9000,
                         help="單個ROI影像差異閾值 (SAD)。這是觸發分數變化的最低門檻，建議使用測試工具來決定此數值。")
     return parser.parse_args()
 
@@ -91,7 +143,17 @@ def write_summary_csv(summary_data, output_dir):
 
 def main():
     args = parse_arguments()
-    
+
+    # 載入 ROI 配置（若指定）
+    roi_team1 = SCORE_ROI_TEAM1
+    roi_team2 = SCORE_ROI_TEAM2
+
+    if args.roi_config:
+        roi_result = load_roi_config(args.roi_config)
+        if roi_result:
+            roi_team1, roi_team2 = roi_result
+        # 若載入失敗，則繼續使用預設值
+
     output_root_abs = os.path.abspath(args.output_dir)
     os.makedirs(output_root_abs, exist_ok=True)
     normal_segments_dir = os.path.join(output_root_abs, "normal_segments")
@@ -107,14 +169,14 @@ def main():
     if fps == 0: print("錯誤: 無法獲取影片的FPS。"); cap.release(); return
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
+
     ret, first_frame = cap.read()
     if not ret: print("錯誤：無法讀取影片的第一幀。"); cap.release(); return
 
-    x1, y1, w1, h1 = SCORE_ROI_TEAM1
+    x1, y1, w1, h1 = roi_team1
     cv2.rectangle(first_frame, (x1, y1), (x1 + w1, y1 + h1), (0, 255, 0), 2)
     cv2.putText(first_frame, 'Team1 ROI', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    x2, y2, w2, h2 = SCORE_ROI_TEAM2
+    x2, y2, w2, h2 = roi_team2
     cv2.rectangle(first_frame, (x2, y2), (x2 + w2, y2 + h2), (0, 0, 255), 2)
     cv2.putText(first_frame, 'Team2 ROI', (x2, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
@@ -145,8 +207,8 @@ def main():
             frames_written_this_segment += 1
 
         if frame_idx % roi_check_interval_frames == 0:
-            current_roi1_gray = get_roi_image(frame, SCORE_ROI_TEAM1, frame_width, frame_height)
-            current_roi2_gray = get_roi_image(frame, SCORE_ROI_TEAM2, frame_width, frame_height)
+            current_roi1_gray = get_roi_image(frame, roi_team1, frame_width, frame_height)
+            current_roi2_gray = get_roi_image(frame, roi_team2, frame_width, frame_height)
 
             if current_roi1_gray is None or current_roi2_gray is None: continue
 

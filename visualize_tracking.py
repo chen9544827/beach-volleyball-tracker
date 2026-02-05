@@ -69,13 +69,56 @@ def get_ball_position(frame_data: dict) -> tuple:
     return None
 
 
-def draw_ball_marker(frame: np.ndarray, position: tuple, 
+def draw_players(frame: np.ndarray, frame_data: dict) -> np.ndarray:
+    """
+    繪製球員標記
+
+    Args:
+        frame: 影格
+        frame_data: 幀數據
+    """
+    if not frame_data:
+        return frame
+
+    players = frame_data.get('player_detections', [])
+
+    for i, player in enumerate(players):
+        # 取得球員邊界框
+        box = player.get('box_coords')
+        if not box or len(box) < 4:
+            continue
+
+        x1, y1, x2, y2 = map(int, box)
+        conf = player.get('confidence', 0)
+
+        # 繪製邊界框（藍色）
+        color = (255, 0, 0)  # 藍色
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # 顯示信心度
+        label = f"P{i+1}: {conf:.2f}"
+        cv2.putText(frame, label, (x1, y1 - 5),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        # 如果有姿態關鍵點，繪製
+        pose_keypoints = player.get('pose_keypoints')
+        if pose_keypoints and len(pose_keypoints) > 0:
+            # 繪製關鍵點（簡化版，只顯示高信心度的點）
+            for kp in pose_keypoints:
+                if len(kp) >= 3 and kp[2] > 0.5:  # 信心度 > 0.5
+                    x, y = int(kp[0]), int(kp[1])
+                    cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)  # 綠色點
+
+    return frame
+
+
+def draw_ball_marker(frame: np.ndarray, position: tuple,
                      trail: deque, frame_id: int,
                      show_trail: bool = True,
                      show_info: bool = True) -> np.ndarray:
     """
     在影格上繪製球標記
-    
+
     Args:
         frame: 影格
         position: (x, y, confidence)
@@ -85,9 +128,13 @@ def draw_ball_marker(frame: np.ndarray, position: tuple,
         show_info: 是否顯示資訊
     """
     if position is None:
-        # 沒有偵測到球，顯示提示
-        cv2.putText(frame, f"Frame {frame_id} - No ball detected", 
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        # 沒有偵測到球，顯示提示（右上角）
+        h, w = frame.shape[:2]
+        text = f"Frame {frame_id} - No ball"
+        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        text_x = w - text_size[0] - 10
+        cv2.putText(frame, text, (text_x, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         return frame
     
     x, y, conf = position
@@ -125,11 +172,18 @@ def draw_ball_marker(frame: np.ndarray, position: tuple,
     cv2.line(frame, (x - 20, y), (x + 20, y), color, 1)
     cv2.line(frame, (x, y - 20), (x, y + 20), color, 1)
     
-    # 顯示資訊
+    # 顯示資訊（右上角）
     if show_info:
+        h, w = frame.shape[:2]
         info_text = f"Frame {frame_id} | Ball: ({x}, {y}) | Conf: {conf:.2f}"
-        cv2.putText(frame, info_text, (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        text_size = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        text_x = w - text_size[0] - 10
+
+        # 繪製黑色背景
+        cv2.rectangle(frame, (text_x - 5, 10), (w - 5, 35), (0, 0, 0), -1)
+        # 繪製文字
+        cv2.putText(frame, info_text, (text_x, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     return frame
 
@@ -215,24 +269,36 @@ def visualize_video(video_path: str, json_path: str, output_path: str = None,
         if not ret:
             break
         
-        # 取得球位置
+        # 取得幀數據
         frame_data = tracking_data.get(frame_id) or tracking_data.get(str(frame_id))
+
+        # 繪製球員（先繪製，在底層）
+        frame = draw_players(frame, frame_data)
+
+        # 取得球位置
         position = get_ball_position(frame_data)
-        
+
         # 更新軌跡
         if position:
             trail.append((position[0], position[1]))
         else:
             trail.append(None)
-        
-        # 繪製標記
+
+        # 繪製球標記（後繪製，在上層）
         frame = draw_ball_marker(frame, position, trail, frame_id, show_trail)
         
-        # 顯示速度
+        # 顯示速度（右上角第二行）
         if show_speed and position:
+            h, w = frame.shape[:2]
             speed = calculate_speed(trail)
             speed_text = f"Speed: {speed:.1f} px/frame"
-            cv2.putText(frame, speed_text, (10, 60), 
+            text_size = cv2.getTextSize(speed_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            text_x = w - text_size[0] - 10
+
+            # 繪製黑色背景
+            cv2.rectangle(frame, (text_x - 5, 40), (w - 5, 65), (0, 0, 0), -1)
+            # 繪製文字
+            cv2.putText(frame, speed_text, (text_x, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         # 輸出影片

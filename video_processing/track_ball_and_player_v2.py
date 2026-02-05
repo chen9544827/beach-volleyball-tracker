@@ -47,7 +47,7 @@ except ImportError:
 
 # --- 模型路徑配置 ---
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
-PLAYER_MODEL_NAME = 'yolov8s-pose.pt'
+PLAYER_MODEL_NAME = 'yolo26m-pose.pt'
 BALL_MODEL_NAME = 'ball_best.pt'
 
 
@@ -133,7 +133,7 @@ def detect_and_filter_players(
     all_candidates = []
     
     try:
-        results = player_pose_model(frame, conf=conf_thresh, classes=[0], verbose=False)
+        results = player_pose_model(frame, conf=0.01, classes=[0], verbose=False, imgsz=6016, max_det=100, iou=0.01)
         
         if not results or not results[0].boxes or not results[0].keypoints:
             return all_candidates
@@ -203,8 +203,8 @@ def run_tracking_v2(
     video_path: str,
     output_dir: str,
     court_config: Dict = None,
-    ball_conf_thresh: float = 0.3,
-    player_conf_thresh: float = 0.15,  # 降低閾值以偵測被遮擋的球員
+    ball_conf_thresh: float = 0.15,#測試修改0.3->0.15
+    player_conf_thresh: float = 0.01,  # 降低閾值以偵測被遮擋的球員和遠距離球員
     detection_interval: int = 1,
     use_ball_tracker: bool = True,
     max_occlusion_frames: int = 15,
