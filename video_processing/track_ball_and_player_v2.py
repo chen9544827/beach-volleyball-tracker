@@ -133,7 +133,10 @@ def detect_and_filter_players(
     all_candidates = []
     
     try:
-        results = player_pose_model(frame, conf=0.01, classes=[0], verbose=False, imgsz=6016, max_det=100, iou=0.01)
+        # 使用標準 640 imgsz，平衡速度和準確度
+        # 測試顯示：imgsz=6016 會導致 GPU OOM 且速度極慢（0.14 fps）
+        # imgsz=640 可達 45 fps，適合大規模處理
+        results = player_pose_model(frame, conf=0.15, classes=[0], verbose=False, imgsz=640, max_det=100, iou=0.45)
         
         if not results or not results[0].boxes or not results[0].keypoints:
             return all_candidates
@@ -285,6 +288,8 @@ def run_tracking_v2(
     
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
     if verbose:
         print(f"[追蹤] 影片: {os.path.basename(video_path)}")
@@ -404,6 +409,8 @@ def run_tracking_v2(
     json_output_path = os.path.join(output_dir, f"{video_base_name}_all_frames_data_with_pose.json")
     
     # 添加元數據
+    resolution_scale = video_height / 720.0 if video_height > 0 else 1.0
+    fps_scale = fps / 25.0 if fps > 0 else 1.0
     output_data = {
         "metadata": {
             "video_path": video_path,
@@ -411,7 +418,14 @@ def run_tracking_v2(
             "fps": fps,
             "detection_interval": detection_interval,
             "use_ball_tracker": use_ball_tracker and HAS_BALL_TRACKER,
-            "processing_time": time.time() - start_time
+            "processing_time": time.time() - start_time,
+            "video_context": {
+                "width": video_width,
+                "height": video_height,
+                "fps": fps,
+                "resolution_scale": round(resolution_scale, 4),
+                "fps_scale": round(fps_scale, 4),
+            }
         },
         "frames": all_frames_data
     }

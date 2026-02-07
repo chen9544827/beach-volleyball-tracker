@@ -1,394 +1,274 @@
-# Beach Volleyball Tracker 🏐
+# Beach Volleyball Tracker
 
-沙灘排球影片分析系統 - 自動追蹤球、偵測發球事件、識別發球員
+FIVB Beach Volleyball video analysis system - automated ball tracking, serve detection, reception analysis, and statistical export.
 
-## 功能概述
+## Features
 
-| 功能 | 說明 | 狀態 |
-|------|------|------|
-| 球追蹤 | 使用 YOLO 模型追蹤排球位置 | ✅ 完成 |
-| 球員偵測 | 偵測球員位置和骨架姿態 | ✅ 完成 |
-| 場地設定 | 互動式設定場地邊界、排除區域 | ✅ 完成 |
-| 發球偵測 | 識別發球事件（拋球→擊球） | ✅ 完成 |
-| 發球員識別 | 判斷是哪位球員發球（Lookback 方法） | ✅ 完成 |
-| 批次處理 | 批次追蹤和分析多個影片 | ✅ 完成 |
-| 跳發偵測 | 判斷發球是否為跳發 | ✅ 完成 |
-| 資料驗證 | 完整的輸入驗證系統（混合策略） | ✅ 完成 |
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Ball Tracking | YOLO model for volleyball position tracking | Done |
+| Player Detection | Player position and pose estimation | Done |
+| Court Config | Interactive court boundary and exclusion zone setup | Done |
+| Serve Detection | Identify serve events (toss -> apex -> hit) | Done |
+| Server Identification | Lookback method to identify serving player | Done |
+| Jump Serve Detection | Classify jump vs standing serve via ankle tracking | Done |
+| Data Validation | Input validation system (mixed strategy) | Done |
+| Filename Parsing | FIVB filename parsing + auto video grouping | Done |
+| Court Zones | 3 serve zones + 6 reception zones per side | Done |
+| Reception Detection | Ball tracking after hit to detect reception | Done |
+| Result Export | CSV/Excel export with structured columns | Done |
+| Video Context | Lightweight video metadata recording | Done |
+| Batch Segmentation | Auto ROI matching + video slicing pipeline | Done |
 
 ---
 
-## 專案結構
+## Project Structure
 
 ```
 beach-volleyball-tracker/
-├── core/                              # 核心模組
+├── core/                              # Core modules
 │   ├── __init__.py
-│   ├── ball_tracker.py                # 球追蹤器（YOLO + 軌跡預測）
-│   ├── serve_detector.py              # 發球偵測器（拋球→頂點→擊球）
-│   ├── server_identifier.py           # 發球員識別（Lookback 方法）
-│   ├── jump_serve_detector.py         # 跳發偵測器
-│   ├── data_validator.py              # 資料驗證器（2026-02-02 新增）
-│   └── error_messages.py              # 錯誤訊息系統（2026-02-02 新增）
+│   ├── ball_tracker.py                # Ball tracker (YOLO + trajectory prediction)
+│   ├── serve_detector.py              # Serve detector (toss -> apex -> hit)
+│   ├── server_identifier.py           # Server identifier (Lookback method)
+│   ├── jump_serve_detector.py         # Jump serve detector
+│   ├── data_validator.py              # Data validator
+│   ├── error_messages.py              # Error message system
+│   ├── filename_parser.py             # FIVB filename parser + video grouping
+│   ├── court_zones.py                 # Court zone system (serve 3 + reception 6)
+│   ├── reception_detector.py          # Reception detector
+│   ├── result_exporter.py             # CSV/Excel result exporter
+│   └── video_context.py              # Lightweight video metadata
 │
-├── video_processing/                  # 影片處理
-│   └── track_ball_and_player_v2.py    # 主要追蹤流程
+├── video_processing/                  # Video processing
+│   ├── track_ball_and_player_v2.py    # Main tracking pipeline
+│   ├── video_slicer_by_score.py       # Score-based video segmentation
+│   ├── roi_config_generator_v2.py     # ROI config GUI tool
+│   └── batch_assign_venues.py         # Batch venue assignment
 │
-├── court_definition/                  # 場地定義工具
-│   └── court_config_generator.py      # 互動式場地設定工具
+├── court_definition/                  # Court definition tools
+│   └── court_config_generator.py      # Interactive court config tool
 │
-├── batch_tracking.py                  # 批次追蹤腳本
-├── batch_test_serve.py                # 批次發球員識別腳本
-├── court_config.json                  # 場地設定檔（排除區域）
+├── batch_tracking.py                  # Batch tracking script
+├── batch_test_serve.py                # Batch serve analysis (main pipeline)
+├── batch_segment_pipeline.py          # Batch video segmentation pipeline
+├── batch_video_slicing.py             # Batch video slicing
 │
-├── test/                              # 測試目錄（2026-02-02 新增）
-│   ├── test_jump_serve_logic.py       # 跳發邏輯單元測試（7 個測試）
-│   └── test_data_validator.py         # 資料驗證器測試（10 個測試）
+├── roi_configs/                       # ROI configurations
+│   ├── venues/                        # Venue templates (reusable)
+│   │   ├── Edmonton.json
+│   │   └── Gstaad.json
+│   └── videos/                        # Per-video configs
 │
-├── test_server_identification.py      # 發球員識別測試腳本
-├── visualize_tracking.py              # 追蹤結果視覺化工具
-├── diagnose_serve.py                  # 發球偵測診斷工具
-├── test_improvements.py               # 測試腳本
+├── court_config.json                  # Court config (boundary + exclusion zones)
 │
-├── CLAUDE.md                          # Claude Code 專案指引
-├── IMPLEMENTATION_SUMMARY.md          # 實作總結（2026-02-02）
-├── VERIFICATION_CHECKLIST.md          # 驗證檢查表（2026-02-02）
+├── test/                              # Tests
+│   ├── test_filename_parser.py        # Filename parser tests (12 cases)
+│   ├── test_court_zones.py            # Court zones tests (15 cases)
+│   ├── test_jump_serve_logic.py       # Jump serve logic tests (7 cases)
+│   └── test_data_validator.py         # Data validator tests (10 cases)
 │
-├── models/                            # YOLO 模型（需自行放置）
-│   ├── best.pt                        # 排球偵測模型
-│   └── yolov8x-pose.pt                # 球員姿態模型
+├── models/                            # YOLO models (not in repo)
+│   ├── ball_best.pt                   # Volleyball detection model
+│   └── yolov8m-pose.pt               # Player pose estimation model
 │
-├── input_video/                       # 輸入影片目錄
-├── test_output/                       # 追蹤輸出目錄（JSON）
-├── batch_test_output/                 # 發球員識別輸出目錄（圖片）
+├── input_video/                       # Input videos
+│   ├── original_video/                # Full match videos
+│   └── analyze_serve/                 # Segmented clips for analysis
+│
+├── CLAUDE.md                          # Claude Code project instructions
 └── README.md
 ```
 
 ---
 
-## 安裝需求
+## Requirements
 
-### Python 環境
+### Python Environment
 ```bash
 Python 3.8+
+# Anaconda base environment recommended
 ```
 
-### 安裝套件
+### Packages
 ```bash
 pip install torch torchvision
 pip install ultralytics
-pip install opencv-python   # 注意：不是 opencv-python-headless
+pip install opencv-python   # NOT opencv-python-headless
 pip install numpy
-```
-
-### YOLO 模型
-- 排球偵測模型：`models/best.pt`
-- 球員姿態模型：`models/yolov8x-pose.pt`
-
----
-
-## 快速開始
-
-### 完整流程（三步驟）
-
-```bash
-# Step 1: 設定場地排除區域（只需執行一次）
-python court_definition/court_config_generator.py \
-    --video_path input_video/analyze_serve/segment_001.mp4 \
-    --output_path court_config.json
-
-# Step 2: 批次追蹤所有影片
-python batch_tracking.py \
-    --video-dir input_video/analyze_serve \
-    --output-dir test_output \
-    --court-config court_config.json
-
-# Step 3: 批次發球員識別
-python batch_test_serve.py \
-    --video-dir input_video/analyze_serve \
-    --json-dir test_output \
-    --output batch_test_output \
-    --court-config court_config.json
+pip install openpyxl         # For Excel export (optional, falls back to CSV)
 ```
 
 ---
 
-## 詳細使用說明
+## Quick Start
 
-### 1. 場地設定（court_config_generator.py）
-
-互動式工具，用於定義：
-- 場地邊界
-- **排除區域**（裁判、工作人員、廣告區）
-- 網子位置
-- 背景球過濾區
+### Full Pipeline
 
 ```bash
+# Step 1: Parse filenames and group videos
+python batch_segment_pipeline.py --video-dir input_video/original_video --dry-run
+
+# Step 2: Set up ROI configs (interactive GUI for missing venues)
+python batch_segment_pipeline.py --video-dir input_video/original_video --roi-only
+
+# Step 3: Segment videos by score changes
+python batch_segment_pipeline.py --video-dir input_video/original_video
+
+# Step 4: Set up court config (once per venue group)
 python court_definition/court_config_generator.py \
     --video_path input_video/segment_001.mp4 \
     --output_path court_config.json
-```
 
-**操作說明：**
-| 步驟 | 動作 | 按鍵 |
-|------|------|------|
-| 1 | 點擊場地四角（左上→左下→右下→右上） | 點擊後按 `q` 確認 |
-| 2 | 框選排除區域（裁判位置） | 按 `a` 新增，`q` 確認，`n` 下一步 |
-| 3 | 點擊網子位置 | 點擊後自動進入下一步 |
-| 4 | 框選背景球區域（可選） | 按 `a` 新增，`n` 完成 |
-
-**輸出檔案 (court_config.json)：**
-```json
-{
-    "court_boundary_polygon": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],
-    "exclusion_zones": [
-        {
-            "name": "右上角裁判區",
-            "polygon": [[1050,0], [1050,280], [1456,280], [1456,0]]
-        }
-    ],
-    "net_y": 280,
-    "background_ball_zones": []
-}
-```
-
----
-
-### 2. 批次追蹤（batch_tracking.py）
-
-追蹤所有影片中的球和球員，輸出 JSON 檔案。
-
-```bash
+# Step 5: Batch tracking
 python batch_tracking.py \
     --video-dir input_video/analyze_serve \
     --output-dir test_output \
     --court-config court_config.json
-```
 
-**參數說明：**
-| 參數 | 說明 | 預設值 |
-|------|------|--------|
-| `--video-dir` | 影片目錄 | (必填) |
-| `--output-dir` | 輸出目錄 | (必填) |
-| `--court-config` | 場地設定 JSON | None |
-| `--detection-interval` | 偵測間隔（每 N 幀） | 1 |
-| `--max-occlusion` | 最大遮擋幀數 | 15 |
-| `--no-tracker` | 停用球追蹤器 | False |
-| `--quiet` | 安靜模式 | False |
-
-**輸出：**
-- `{video_name}_all_frames_data_with_pose.json` - 每個影片的追蹤數據
-
----
-
-### 3. 批次發球員識別（batch_test_serve.py）
-
-分析追蹤數據，識別發球員。
-
-```bash
+# Step 6: Batch serve analysis + reception detection + export
 python batch_test_serve.py \
     --video-dir input_video/analyze_serve \
     --json-dir test_output \
     --output batch_test_output \
-    --court-config court_config.json
-```
-
-**參數說明：**
-| 參數 | 說明 | 預設值 |
-|------|------|--------|
-| `--video-dir` | 影片目錄 | (必填) |
-| `--json-dir` | JSON 追蹤數據目錄 | (必填) |
-| `--output` | 輸出目錄 | batch_test_output |
-| `--court-config` | 場地設定 JSON | None |
-| `--no-images` | 不儲存圖片 | False |
-| `--verbose` | 詳細模式 | False |
-
-**輸出：**
-- `{video_name}_server_FOUND.jpg` - 找到球員與球重疊的幀（**判斷依據**）
-- `{video_name}_server_TOSS.jpg` - 拋球幀（參考）
-- `{video_name}_server_HIT.jpg` - 擊球幀（參考）
-
----
-
-## 核心演算法
-
-### 發球員識別 - Lookback 方法
-
-**問題**：在拋球幀或擊球幀時，球可能已經離開球員手中，難以判斷誰是發球員。
-
-**解決方案**：從拋球幀**往回找**，直到找到球員與球**重疊**（距離 < 100 像素）的幀。
-
-```
-拋球幀 (frame 344)
-    ↓
-檢查：有球員與球重疊嗎？→ 沒有
-    ↓
-往回一幀 (frame 343)
-    ↓
-檢查：有球員與球重疊嗎？→ 沒有
-    ↓
-... 重複 ...
-    ↓
-找到！frame 310 有球員與球重疊
-    ↓
-該球員 = 發球員 ✅
-```
-
-**排除區域**：裁判、工作人員等會被排除，不會被誤判為發球員。
-
----
-
-### 發球偵測流程
-
-```
-球軌跡分析
-    ↓
-偵測拋球（球向上移動，vy > 8）
-    ↓
-偵測頂點（球開始向下）
-    ↓
-偵測擊球（速度 > 40，水平移動）
-    ↓
-輸出發球事件
+    --court-config court_config.json \
+    --export-excel
 ```
 
 ---
 
-## JSON 數據格式
+## FIVB Filename Format
 
-### 追蹤數據 (`*_all_frames_data_with_pose.json`)
+Videos follow the FIVB World Tour / VIS naming convention:
 
-```json
-{
-  "metadata": {
-    "video_path": "input_video/segment_029.mp4",
-    "total_frames": 744,
-    "fps": 25.0
-  },
-  "frames": [
-    {
-      "frame_id": 0,
-      "ball_detections": [
-        {
-          "box_coords": [650, 280, 680, 310],
-          "confidence": 0.85,
-          "center_point": [665, 295],
-          "is_in_background_zone": false
-        }
-      ],
-      "player_detections": [
-        {
-          "box_coords": [600, 400, 700, 700],
-          "confidence": 0.92,
-          "center_point": [650, 550],
-          "pose_keypoints": [[x, y, conf], ...]
-        }
-      ]
-    }
-  ]
-}
+```
+FIVB_BVB_WT19_Edmonton_3Star_1718_C4_QT_W_007_Strauss_T_...
+|    |   |    |         |      |    |  |  | |
+|    |   |    |         |      |    |  |  | +-- Match number (007)
+|    |   |    |         |      |    |  |  +---- Gender (W=Women, M=Men)
+|    |   |    |         |      |    |  +------- Round (QT/MD/SF/F)
+|    |   |    |         |      |    +---------- Court number (C1-C4)
+|    |   |    |         |      +--------------- Date range (match days)
+|    |   |    |         +---------------------- Star level (3Star/4Star/5Star)
+|    |   |    +-------------------------------- Venue name
+|    |   +------------------------------------- Season (WT18/WT19)
+|    +----------------------------------------- Beach VolleyBall
++---------------------------------------------- FIVB
 ```
 
-### 骨架關鍵點 (COCO 17-point)
+Both underscore (`_`) and hyphen (`-`) separators are supported.
 
-| Index | 關鍵點 | 用途 |
-|-------|--------|------|
-| 0 | 鼻子 | - |
-| 5, 6 | 左/右肩 | 身體位置 |
-| 7, 8 | 左/右肘 | 手臂動作 |
-| 9, 10 | 左/右手腕 | **發球判斷** |
-| 11, 12 | 左/右髖 | 身體位置 |
-| 13, 14 | 左/右膝 | 跳發偵測 |
-| 15, 16 | 左/右腳踝 | **跳發偵測** |
+**Grouping key:** `venue_year_court` (e.g., `Edmonton_WT19_C4`)
+- Videos in the same group share court_config and ROI config
 
 ---
 
-## 輸出圖片說明
+## Batch Segmentation Pipeline
 
-### FOUND 幀（判斷依據）
-- 顯示找到球員與球重疊的幀
-- 綠色框 = 發球員
-- 藍色框 = 其他球員
-- 黃色圈 = 球
-- 紫色框 = 排除區域
+`batch_segment_pipeline.py` automates the full segmentation workflow:
 
-### TOSS / HIT 幀（參考）
-- 顯示拋球幀和擊球幀
-- 用於驗證發球員識別結果
-
----
-
-## 診斷工具
-
-### 發球偵測診斷
+1. Scan video directory and parse FIVB filenames
+2. Group videos by venue + year + court
+3. Match each group to ROI venue templates
+4. For missing ROIs: launch interactive GUI for setup
+5. Segment all videos by score changes
 
 ```bash
-python diagnose_serve.py \
-    --input test_output/segment_029_all_frames_data_with_pose.json
+# Preview grouping (no actions)
+python batch_segment_pipeline.py --video-dir input_video/original_video --dry-run
+
+# Only set up missing ROIs
+python batch_segment_pipeline.py --video-dir input_video/original_video --roi-only
+
+# Only slice (skip groups without ROI)
+python batch_segment_pipeline.py --video-dir input_video/original_video --slice-only
+
+# Full pipeline
+python batch_segment_pipeline.py --video-dir input_video/original_video
 ```
 
-**輸出：**
-- 軌跡統計（偵測率、速度分佈）
-- 潛在拋球序列
-- 高速事件列表
-- 參數調整建議
-
 ---
 
-## 參數調整
+## Court Zone System
 
-### 發球偵測參數
+Standard beach volleyball court zones for serve and reception analysis:
 
-```python
-config = {
-    'hit_v': 40.0,              # 擊球速度閾值
-    'toss_vy': 8.0,             # 拋球垂直速度閾值
-}
+```
+              Net
+  +-----+-----+-----+
+  |  1  |  2  |  3  |  Far side (top of screen)
+  | Left| Mid |Right|  Reception zones = front row 1-3
+  +-----+-----+-----+
+  |  4  |  5  |  6  |  Reception zones = back row 4-6
+  | Left| Mid |Right|
+  +-----+-----+-----+
+              Net
+  +-----+-----+-----+
+  |  1  |  2  |  3  |  Near side (bottom of screen)
+  | Left| Mid |Right|  Reception zones = front row 1-3
+  +-----+-----+-----+
+  |  4  |  5  |  6  |  Reception zones = back row 4-6
+  | Left| Mid |Right|
+  +-----+-----+-----+
+
+Serve zones (behind end line): Left / Center / Right = 3 zones
 ```
 
-**調整建議：**
-- 漏偵測發球 → 降低 `hit_v`
-- 誤判太多 → 提高 `hit_v`
-- 拋球偵測不穩 → 調整 `toss_vy`
-
-### 發球員識別參數
-
-| 參數 | 說明 | 預設值 |
-|------|------|--------|
-| `overlap_threshold` | 球員與球重疊的距離閾值 | 100 像素 |
-| `max_lookback` | 最多往回找幾幀 | 90 幀 |
+Zones are computed from `court_boundary_polygon` (4 points) + `net_y` with perspective correction.
 
 ---
 
-## 已知限制
+## Result Export
 
-1. **網子遮擋**：對面場地的球員可能被網子遮擋，導致偵測不到
-2. **快速移動**：極快的發球可能追蹤跳幀
-3. **多球干擾**：畫面中有多顆球可能干擾
-4. **攝影機角度**：不同角度需要重新設定排除區域
+`batch_test_serve.py --export-excel` outputs structured data:
+
+**Columns per serve event:**
+- Basic info: video_name, venue, year, court, gender, round, match_number, star_level, group_key
+- Serve analysis: serve_detected, toss_frame, hit_frame, hit_speed, server_index, confidence, serve_type, is_jump_serve, jump_height
+- Serve zone: serve_zone (1-3), serving_side (near/far)
+- Reception: reception_detected, reception_frame, reception_zone (1-6), receiver_index, time_to_reception
+- Quality: quality_grade (A/B/C/F), ball_detection_rate, status
+
+**Quality grades:**
+- A: detection rate > 70%
+- B: detection rate 50-70%
+- C: detection rate 30-50%
+- F: detection rate < 30% (suggest exclude)
 
 ---
 
-## 測試
+## Core Algorithms
 
-### 單元測試（2026-02-02 新增）
+### Server Identification - Lookback Method
+
+From toss frame, search backward up to 90 frames to find the first frame where a player overlaps with the ball (distance < threshold), excluding players in exclusion zones.
+
+### Serve Detection State Machine
+
+```
+SEARCHING_TOSS -> CONFIRMING_TOSS -> AWAITING_APEX -> AWAITING_HIT -> [Event] -> COOLDOWN
+```
+
+### Reception Detection
+
+After serve hit, track ball trajectory until it crosses the net and a receiver player is found nearby. Uses ball-player proximity + speed/direction change as combined criteria.
+
+### Jump Serve Detection
+
+Analyzes ankle keypoint Y-trajectory from FOUND frame to hit frame. Jump threshold: min 30px height (720p), 3+ consecutive frames.
+
+---
+
+## Tests
 
 ```bash
-# 測試跳發邏輯（7 個測試案例）
-python test/test_jump_serve_logic.py
+# Unit tests (44 total)
+python test/test_filename_parser.py      # Filename parser (12 cases)
+python test/test_court_zones.py          # Court zones (15 cases)
+python test/test_jump_serve_logic.py     # Jump serve logic (7 cases)
+python test/test_data_validator.py       # Data validator (10 cases)
 
-# 測試資料驗證器（10 個測試案例）
-python test/test_data_validator.py
-```
-
-**測試覆蓋：**
-- 跳發連續序列偵測（包含邊界情況）
-- JSON 資料驗證（嚴格與寬鬆策略）
-- 錯誤處理與容錯能力
-
-### 回歸測試
-
-```bash
-# 完整批次測試
+# Regression test
 python batch_test_serve.py \
     --video-dir input_video/analyze_serve \
     --json-dir test_output \
@@ -398,65 +278,54 @@ python batch_test_serve.py \
 
 ---
 
-## 待開發功能
+## Known Limitations
 
-- [x] ~~跳發偵測（分析腳踝位置變化）~~ ✅ 已完成
-- [ ] 發球落點預測
-- [ ] 發球速度估算（需要場地校準）
-- [ ] GUI 介面
-- [ ] 即時分析模式
+1. **Resolution dependency**: All pixel thresholds calibrated for 720p
+2. **Net occlusion**: Far-side player detection rate drops due to net
+3. **Camera angle**: Different angles require separate court_config
+4. **Max tracking gap**: 15 frames (adjustable via `--max-occlusion`)
+5. **Player ID instability**: Player indices may change between frames
+6. **Windows encoding**: Output avoids Unicode special chars (uses [OK], [ERROR])
 
 ---
 
-## 更新日誌
+## Changelog
 
-### v2.1 (2026-02-02) - 穩定性與驗證系統
+### v3.0 (2026-02-07) - Analysis Pipeline Expansion
 
-**🐛 錯誤修復：**
-- 修復跳發偵測連續序列演算法（最長序列在結尾時的 bug）
-- 修復所有 Windows cp950 編碼問題
+**New modules:**
+- `core/filename_parser.py` - FIVB filename parsing + auto video grouping
+- `core/court_zones.py` - 3 serve zones + 6 reception zones per side (perspective-aware)
+- `core/reception_detector.py` - Ball tracking after serve hit to detect reception
+- `core/result_exporter.py` - CSV/Excel export with 30+ structured columns
+- `core/video_context.py` - Lightweight video metadata (resolution, FPS)
+- `batch_segment_pipeline.py` - Automated ROI matching + video segmentation
 
-**✨ 新功能：**
-- 完整資料驗證系統（`core/data_validator.py`, `core/error_messages.py`）
-  - 混合驗證策略：關鍵欄位嚴格驗證，次要欄位寬鬆處理
-  - 統一的繁體中文錯誤訊息
-  - 支援遮擋情況下的部分資料缺失
-- 17 個單元測試（100% 通過率）
-- 詳細文件：`IMPLEMENTATION_SUMMARY.md`, `VERIFICATION_CHECKLIST.md`
+**Integrations:**
+- `batch_test_serve.py` - Serve zone, reception detection, CSV/Excel export
+- `track_ball_and_player_v2.py` - video_context in metadata output
 
-**🔧 整合改進：**
-- `batch_test_serve.py` - 整合驗證系統
-- `batch_tracking.py` - 整合驗證系統
-- `core/serve_detector.py` - 編碼修復
-- `core/jump_serve_detector.py` - 邏輯修復與驗證
+**Tests:** 44 unit tests (12 + 15 + 7 + 10), 100% pass rate
 
-**📊 測試結果：**
-- 單元測試：17/17 通過
-- 批次測試：10/10 影片成功（100%）
-- 跳發偵測準確率：90%
+### v2.1 (2026-02-02) - Stability and Validation
+
+- Fixed jump serve consecutive sequence algorithm
+- Fixed Windows cp950 encoding issues
+- Added data validation system (`core/data_validator.py`)
+- 17 unit tests, 100% pass rate
 
 ### v2.0 (2025-01-26)
-- ✅ 新增 Lookback 方法識別發球員
-- ✅ 新增場地排除區域功能
-- ✅ 新增批次追蹤腳本 (batch_tracking.py)
-- ✅ 新增批次發球員識別腳本 (batch_test_serve.py)
-- ✅ 新增場地設定工具 (court_config_generator.py)
-- ✅ 輸出圖片顯示排除區域
+
+- Lookback method for server identification
+- Court exclusion zones
+- Batch tracking and analysis scripts
 
 ### v1.0 (2025-01-23)
-- ✅ 基本球追蹤功能
-- ✅ 球員姿態偵測
-- ✅ 發球偵測（拋球→擊球）
-- ✅ 基本發球員識別
+
+- Basic ball tracking, player detection, serve detection
 
 ---
 
 ## License
 
 MIT License
-
----
-
-## 聯絡方式
-
-如有問題或建議，請開 Issue 或聯繫作者。

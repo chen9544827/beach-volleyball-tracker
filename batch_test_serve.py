@@ -21,10 +21,14 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.serve_detector import analyze_serve_events_v2
-from core.server_identifier import analyze_serve_player, get_keypoint
+from core.server_identifier import analyze_serve_player, get_keypoint, determine_serving_side
 from core.jump_serve_detector import classify_serve_type
 from core.data_validator import DataValidator, safe_load_json, validate_center_point
 from core.error_messages import ValidationError, format_error
+from core.filename_parser import parse_filename
+from core.court_zones import CourtZones
+from core.reception_detector import ReceptionDetector
+from core.result_exporter import build_result_row, export_to_csv, export_to_excel, export_summary_json
 import logging
 
 # 設定日誌
@@ -246,12 +250,13 @@ def draw_serve_analysis(frame, frame_data, ball_position, server_result, frame_l
     return frame
 
 
-def process_single_video(video_path: str, json_path: str, output_dir: str, 
+def process_single_video(video_path: str, json_path: str, output_dir: str,
                          save_images: bool = True, verbose: bool = False,
-                         court_config: dict = None) -> dict:
+                         court_config: dict = None,
+                         court_zones: CourtZones = None) -> dict:
     """
     處理單個影片
-    
+
     Args:
         video_path: 影片路徑
         json_path: JSON 追蹤資料路徑
@@ -259,12 +264,13 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         save_images: 是否儲存圖片
         verbose: 是否顯示詳細訊息
         court_config: 場地設定（包含 exclusion_zones）
-    
+        court_zones: CourtZones 實例（用於區域判定）
+
     Returns:
         處理結果字典
     """
     video_name = os.path.splitext(os.path.basename(video_path))[0]
-    
+
     result = {
         'video_name': video_name,
         'status': 'unknown',
@@ -273,7 +279,17 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         'hit_frame': None,
         'server_index': None,
         'confidence': 0,
-        'error': None
+        'error': None,
+        # New fields
+        'serve_zone': None,
+        'serving_side': None,
+        'reception_detected': False,
+        'reception_frame': None,
+        'reception_zone': None,
+        'receiver_index': None,
+        'time_to_reception': None,
+        'reception_confidence': 0,
+        'ball_crossed_net': False,
     }
     
     try:
@@ -352,7 +368,46 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         result['jump_confidence'] = jump_result.get('confidence', 0)
         result['jump_height'] = jump_result.get('jump_height', 0)
         result['ground_y'] = jump_result.get('ground_y')
-        
+
+        # Serving side determination
+        net_y = court_config.get('net_y', image_height * 0.35) if court_config else image_height * 0.35
+        hit_position = serve_event.get('hit_position')
+        if hit_position:
+            serving_side = determine_serving_side(
+                hit_position, image_height=image_height,
+                net_position_ratio=net_y / image_height if court_config else 0.35
+            )
+            result['serving_side'] = serving_side
+
+            # Serve zone detection
+            if court_zones and server_result.get('server'):
+                server_pos = validate_center_point(
+                    server_result['server'].get('center_point')
+                )
+                if server_pos:
+                    result['serve_zone'] = court_zones.get_serve_zone(server_pos, serving_side)
+
+            # Reception detection
+            try:
+                reception_detector = ReceptionDetector()
+                reception_result = reception_detector.analyze_reception(
+                    frames_data=frames_data,
+                    serve_event=serve_event,
+                    net_y=net_y,
+                    serving_side=serving_side,
+                    court_zones=court_zones,
+                )
+                result['reception_detected'] = reception_result.get('reception_detected', False)
+                result['reception_frame'] = reception_result.get('reception_frame')
+                result['reception_zone'] = reception_result.get('reception_zone')
+                result['receiver_index'] = reception_result.get('receiver_index')
+                result['time_to_reception'] = reception_result.get('time_to_reception')
+                result['reception_confidence'] = reception_result.get('confidence', 0)
+                result['ball_crossed_net'] = reception_result.get('ball_crossed_net', False)
+            except Exception as e:
+                if verbose:
+                    print(f"    [WARNING] Reception detection failed: {e}")
+
         # 儲存圖片
         if save_images:
             if cap.isOpened():
@@ -490,9 +545,15 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
     
     # 載入場地設定
     court_config = load_court_config(court_config_path)
+    court_zones = None
     if court_config:
         exclusion_count = len(court_config.get('exclusion_zones', []))
         print(f"場地設定: {court_config_path} (排除區域: {exclusion_count} 個)")
+        try:
+            court_zones = CourtZones(court_config)
+            print(f"場地分區: 已建立 (net_y={court_zones.net_y})")
+        except Exception as e:
+            print(f"場地分區: 建立失敗 ({e})")
     else:
         print(f"場地設定: 未指定（不排除任何區域）")
     print()
@@ -522,7 +583,8 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
             video_path, json_path, output_dir,
             save_images=save_images,
             verbose=verbose,
-            court_config=court_config
+            court_config=court_config,
+            court_zones=court_zones
         )
         results.append(result)
         
@@ -532,10 +594,17 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
             searched = result.get('frames_searched', 0)
             serve_type = result.get('serve_type', 'unknown')
             serve_emoji = '[JUMP]' if serve_type == 'jump' else '[STAND]'
+            reception_info = ""
+            if result.get('reception_detected'):
+                rz = result.get('reception_zone', '?')
+                reception_info = f", Reception: zone {rz}"
+            sz_info = ""
+            if result.get('serve_zone'):
+                sz_info = f", ServeZone: {result['serve_zone']}"
             print(f"    [SUCCESS] 找到幀: {found} (往回 {searched} 幀), "
                   f"發球員: Player {result['server_index']}, "
                   f"信心度: {result['confidence']:.2f}, "
-                  f"{serve_emoji} {serve_type}")
+                  f"{serve_emoji} {serve_type}{sz_info}{reception_info}")
         elif result['status'] == 'no_serve':
             print(f"    [WARNING] 未偵測到發球")
         else:
@@ -583,7 +652,38 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
         print(f"  跳發高度:")
         print(f"    平均: {sum(jump_heights)/len(jump_heights):.1f} 像素")
         print(f"    最高: {max(jump_heights):.1f} 像素")
-    
+
+    # 發球區統計
+    serve_zone_counts = {}
+    for r in results:
+        sz = r.get('serve_zone')
+        if sz is not None:
+            serve_zone_counts[sz] = serve_zone_counts.get(sz, 0) + 1
+    if serve_zone_counts:
+        print()
+        print(f"發球區統計:")
+        for z in sorted(serve_zone_counts.keys()):
+            zone_names = {1: 'Left', 2: 'Center', 3: 'Right'}
+            print(f"  Zone {z} ({zone_names.get(z, '?')}): {serve_zone_counts[z]}")
+
+    # 接球統計
+    receptions = [r for r in results if r.get('reception_detected')]
+    print()
+    print(f"接球偵測統計:")
+    print(f"  偵測到接球: {len(receptions)} / {success} ({len(receptions)/max(1,success)*100:.1f}%)")
+    if receptions:
+        reception_zone_counts = {}
+        for r in receptions:
+            rz = r.get('reception_zone')
+            if rz is not None:
+                reception_zone_counts[rz] = reception_zone_counts.get(rz, 0) + 1
+        if reception_zone_counts:
+            print(f"  接球區分布:")
+            zone_names_6 = {1: 'Front-L', 2: 'Front-C', 3: 'Front-R',
+                            4: 'Back-L', 5: 'Back-C', 6: 'Back-R'}
+            for z in sorted(reception_zone_counts.keys()):
+                print(f"    Zone {z} ({zone_names_6.get(z, '?')}): {reception_zone_counts[z]}")
+
     # 儲存結果到 JSON
     summary = {
         'test_time': datetime.now().isoformat(),
@@ -603,6 +703,32 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
         json.dump(summary, f, indent=2, ensure_ascii=False)
     print()
     print(f"詳細結果已儲存: {summary_path}")
+
+    # Export CSV with structured results
+    try:
+        export_rows = []
+        for r in results:
+            parsed = parse_filename(r.get('video_name', ''))
+            row = build_result_row(
+                video_name=r.get('video_name', ''),
+                parsed_filename=parsed,
+                serve_result=r,
+                reception_result=r,
+                ball_detection_rate=r.get('ball_detection_rate', 0),
+                status=r.get('status', 'unknown'),
+            )
+            export_rows.append(row)
+
+        csv_path = os.path.join(output_dir, 'batch_results.csv')
+        export_to_csv(export_rows, csv_path)
+        print(f"CSV 結果已儲存: {csv_path}")
+
+        # Also export summary JSON
+        summary_export_path = os.path.join(output_dir, 'batch_results_summary.json')
+        export_summary_json(export_rows, summary_export_path)
+        print(f"摘要已儲存: {summary_export_path}")
+    except Exception as e:
+        print(f"[WARNING] Export failed: {e}")
     
     # 列出需要檢查的影片
     need_check = [r for r in results if r['status'] != 'success' or r['confidence'] < 0.5]
@@ -638,6 +764,8 @@ def main():
                         help="不儲存圖片（只輸出統計）")
     parser.add_argument("--verbose", action="store_true",
                         help="顯示詳細處理過程")
+    parser.add_argument("--export-excel", action="store_true",
+                        help="額外匯出 Excel 格式（需要 openpyxl）")
     
     args = parser.parse_args()
     

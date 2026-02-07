@@ -27,23 +27,25 @@ Beach Volleyball Tracker (沙灘排球影片分析系統) 是一個基於 Python
 
 ### 影片檔名格式
 
-影片命名包含豐富的元資料，可自動解析場地和分組：
+影片命名包含豐富的元資料（依 FIVB 世界巡迴賽 / VIS 系統慣例），可自動解析場地和分組：
 ```
 FIVB_BVB_WT19_Edmonton_3Star_1718_C4_QT_W_007_Strauss_T_...
 |    |   |    |         |      |    |  |  | |
-|    |   |    |         |      |    |  |  | +-- 場次編號
-|    |   |    |         |      |    |  |  +---- 性別 (W=女子)
-|    |   |    |         |      |    |  +------- 輪次 (QT/MD/SF/F)
-|    |   |    |         |      |    +---------- 攝影機 (C1-C4)
-|    |   |    |         |      +--------------- 日期
-|    |   |    |         +---------------------- 星級
-|    |   |    +-------------------------------- 場地名
-|    |   +------------------------------------- 年份 (WT18/WT19)
-|    +----------------------------------------- 排球類型 (BVB)
-+---------------------------------------------- FIVB
+|    |   |    |         |      |    |  |  | +-- 場次編號 (Match 7)
+|    |   |    |         |      |    |  |  +---- 性別 (W=女子, M=男子)
+|    |   |    |         |      |    |  +------- 輪次 (QT=資格賽, MD=主賽, SF=準決賽, F=決賽)
+|    |   |    |         |      |    +---------- 場地編號 Court (C1-C4)
+|    |   |    |         |      +--------------- 日期範圍（比賽天數，格式不固定）
+|    |   |    |         +---------------------- 站點星級 (3Star/4Star/5Star)
+|    |   |    +-------------------------------- 比賽站點名
+|    |   +------------------------------------- 賽季 (WT18=World Tour 2018, WT19=2019)
+|    +----------------------------------------- Beach VolleyBall (沙灘排球)
++---------------------------------------------- FIVB (國際排球總會)
+
+後續段落：球員姓名_國家代碼（兩隊），最末可能有 clip/set index（如 _2）
 ```
 
-**分組邏輯：** 配置單位 = 「場地 + 年份 + 攝影機編號」（如 `Edmonton_WT19_C4`）
+**分組邏輯：** 配置單位 = 「站點 + 賽季 + 場地編號」（如 `Edmonton_WT19_C4`）
 - 同場比賽固定視角，但兩年同場地可能不同視角
 - 同一組的影片共享 court_config 和 ROI config
 - 有兩種檔名分隔符變體（底線 `_` 和連字號 `-`）
@@ -150,9 +152,17 @@ python batch_test_serve.py \
     --court-config court_config.json
 ```
 
-### 步驟 5: 結果彙整（開發中）
+### 步驟 5: 結果彙整
 
-將所有分析結果彙整為 Excel/CSV。
+```bash
+# 發球分析 + 接球偵測 + CSV/Excel 匯出
+python batch_test_serve.py \
+    --video-dir input_video/analyze_serve \
+    --json-dir test_output \
+    --output batch_test_output \
+    --court-config court_config.json \
+    --export-excel
+```
 
 ---
 
@@ -189,13 +199,43 @@ TRACKING ─(偵測失敗)→ OCCLUDED ─(持續失敗)→ LOST
 - 跳躍閾值：最小 30px 高度（720p 基準）、3 幀以上連續
 - **修復紀錄 (2026-02-02)**：修復連續序列偵測演算法
 
-### 排球落點偵測（開發中）
+### 場地分區系統
 
-`core/landing_detector.py`（待建立）偵測發球後球的落點位置：
-- 從擊球幀開始監控球軌跡
-- 組合判斷：Y 座標觸底 + 速度突降 + 垂直速度反轉
-- 分類：有效落點（場內）/ 出界 / 觸網
-- 依賴 court_config 的場地邊界
+`core/court_zones.py` 將場地分為標準沙排區域：
+- 3 個發球區（左/中/右，端線後方）
+- 6 個接球區（前排 1-3 + 後排 4-6，每側）
+- 從 `court_boundary_polygon` (4 點) + `net_y` 自動計算
+- 考慮透視變形（遠端比近端窄）
+
+### 接球偵測
+
+`core/reception_detector.py` 從擊球幀追蹤球軌跡：
+- 偵測球跨過 net_y（進入對方半場）
+- 找到最近的接球員（距離 < 80px）
+- 組合判斷：球員接近 + 球速/方向改變
+- 輸出：接球幀、接球區域(1-6)、接球員、接球時間
+
+### 檔名解析與影片分組
+
+`core/filename_parser.py` 自動解析 FIVB 影片檔名：
+- 支援底線和連字號兩種格式
+- 提取：場地、賽季、場地編號、性別、輪次、場次
+- 按 `venue_year_court` 自動分組
+- `scan_video_directory()` 掃描目錄、`group_videos()` 分組
+
+### 批次分段管線
+
+`batch_segment_pipeline.py` 自動化影片分段流程：
+- 掃描影片目錄 -> 解析檔名 -> 分組 -> 匹配 ROI -> 分段
+- 支援 `--dry-run`、`--roi-only`、`--slice-only` 模式
+- 缺少 ROI 時自動啟動 GUI 設定工具
+
+### 結果匯出
+
+`core/result_exporter.py` 匯出分析結果：
+- CSV/Excel 格式，30+ 欄位
+- 包含：基本資訊、發球分析、發球區、接球分析、品質指標
+- `export_summary_json()` 輸出統計摘要
 
 ### 資料驗證系統
 
@@ -342,12 +382,15 @@ min_jump_frames: 3        # 超過閾值的最小連續幀數
 - 紅點 = 手腕關鍵點
 - 橘點 = 腳踝關鍵點（僅發球員）
 
-### 最終 Excel/CSV 輸出格式（開發中）
+### Excel/CSV 輸出格式
 
 **發球明細表：每個發球事件一行**
 ```
-| 影片名 | 片段名 | 場地 | 年份 | 發球類型 | 發球員 | 信心度 |
-| 拋球幀 | 擊球幀 | 擊球速度 | 跳躍高度 | 落點位置 | 品質等級 |
+基本資訊: video_name, venue, year, court, gender, round, match_number, star_level, group_key
+發球分析: serve_detected, toss_frame, hit_frame, hit_speed, server_index, confidence, serve_type, is_jump_serve, jump_height
+發球區域: serve_zone (1-3), serving_side (near/far)
+接球分析: reception_detected, reception_frame, reception_zone (1-6), receiver_index, time_to_reception
+品質指標: quality_grade (A/B/C/F), ball_detection_rate, status
 ```
 
 **品質等級：**
@@ -361,7 +404,9 @@ min_jump_frames: 3        # 超過閾值的最小連續幀數
 ## 測試
 
 ```bash
-# 單元測試
+# 單元測試（共 44 個）
+python test/test_filename_parser.py       # 檔名解析（12 案例）
+python test/test_court_zones.py           # 場地分區（15 案例）
 python test/test_jump_serve_logic.py      # 跳發邏輯（7 案例）
 python test/test_data_validator.py        # 資料驗證（10 案例）
 
@@ -391,9 +436,14 @@ python batch_test_serve.py \
 
 ## 開發 Roadmap
 
-完整 roadmap 見計畫文件。核心 Phase：
-1. **Phase 0**：修復批次分割編碼 bug + 測試新模型
-2. **Phase 1**：分辨率正規化 + 檔名解析 + 場地自動匹配
-3. **Phase 2**：排球落點偵測 + 困難片段跳過 + 配置建立
-4. **Phase 3**：大規模批次管線（多 GPU、進度追蹤、流式處理）
-5. **Phase 4**：Excel/CSV 結果彙整 + 品質驗證
+| Phase | Task | Status |
+|-------|------|--------|
+| **P0** | FIVB filename parsing + video grouping | Done |
+| **P1** | Court zone system (3 serve + 6 reception zones) | Done |
+| **P2** | Reception detection (ball tracking after hit) | Done |
+| **P3** | Pass quality assessment | Pending (needs requirement discussion) |
+| **P4** | CSV/Excel result export | Done |
+| **P5** | VideoContext lightweight metadata | Done |
+| **Batch** | Automated segmentation pipeline | Done |
+| **Next** | Court config setup per venue group | In Progress |
+| **Next** | Large-scale batch processing (multi-GPU) | Pending |
