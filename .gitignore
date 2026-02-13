@@ -204,3 +204,6 @@ batch_test_output/
 
 # 暫存測試檔案
 nul
+models/
+predict_output/
+court_configs/backup/

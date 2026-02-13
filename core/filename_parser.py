@@ -213,6 +213,43 @@ def group_videos(video_paths: List[str]) -> Dict[str, List[Dict]]:
     return dict(groups)
 
 
+def extract_group_key_from_path(file_path: str) -> Optional[str]:
+    """
+    從檔案路徑中提取 group_key（fallback 方法）
+
+    當檔名本身無法解析時（例如 segment_010_Team1.mp4），
+    嘗試從父目錄路徑中找到符合 group_key 格式的目錄名，
+    或解析父目錄中的 FIVB 檔名。
+
+    目錄結構範例：
+        video_segments/Chetumal_WT18_C1/FIVB-BVB-.../normal_segments/segment_010.mp4
+                       ^^^^^^^^^^^^^^^^ ← group_key 格式的目錄名
+
+    Args:
+        file_path: 影片檔案的完整路徑
+
+    Returns:
+        group_key 字串（如 'Chetumal_WT18_C1'），找不到時回傳 None
+    """
+    # 模式：{Venue}_{WTxx}_{Cx}
+    group_key_pattern = re.compile(r'^[A-Za-z][A-Za-z0-9_-]+_WT\d{2}_C\d+$')
+
+    parts = os.path.normpath(file_path).split(os.sep)
+
+    # 往上走每一層目錄，檢查是否符合 group_key 格式
+    for part in reversed(parts[:-1]):  # 排除檔名本身
+        if group_key_pattern.match(part):
+            return part
+
+    # 第二策略：嘗試解析路徑中的 FIVB 目錄名
+    for part in reversed(parts[:-1]):
+        parsed = parse_filename(part)
+        if parsed and parsed.get('group_key'):
+            return parsed['group_key']
+
+    return None
+
+
 def scan_video_directory(directory: str, extensions: tuple = ('.mp4', '.avi', '.mkv', '.mov')) -> List[str]:
     """
     掃描目錄中的影片檔案

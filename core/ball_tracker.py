@@ -428,6 +428,13 @@ class BallTracker:
             return self.trajectory.copy()
         return self.trajectory[-last_n:]
     
+    def get_last_position(self) -> Optional[np.ndarray]:
+        """Get the last known ball position, or None if no trajectory."""
+        if not self.trajectory:
+            return None
+        t = self.trajectory[-1]
+        return np.array([t[1], t[2]])
+
     def get_recent_positions(self, n: int = 5) -> List[np.ndarray]:
         """獲取最近 N 個位置（用於速度計算等）"""
         recent = self.trajectory[-n:] if len(self.trajectory) >= n else self.trajectory

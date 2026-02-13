@@ -25,7 +25,7 @@ from core.server_identifier import analyze_serve_player, get_keypoint, determine
 from core.jump_serve_detector import classify_serve_type
 from core.data_validator import DataValidator, safe_load_json, validate_center_point
 from core.error_messages import ValidationError, format_error
-from core.filename_parser import parse_filename
+from core.filename_parser import parse_filename, extract_group_key_from_path
 from core.court_zones import CourtZones
 from core.reception_detector import ReceptionDetector
 from core.result_exporter import build_result_row, export_to_csv, export_to_excel, export_summary_json
@@ -522,19 +522,20 @@ def find_matching_files(video_dir: str, json_dir: str) -> list:
     return matches
 
 
-def batch_test(video_dir: str, json_dir: str, output_dir: str, 
+def batch_test(video_dir: str, json_dir: str, output_dir: str,
                save_images: bool = True, verbose: bool = False,
-               court_config_path: str = None):
+               court_config_path: str = None, court_config_dir: str = None):
     """
     批次測試整個資料夾
-    
+
     Args:
         video_dir: 影片目錄
         json_dir: JSON 追蹤資料目錄
         output_dir: 輸出目錄
         save_images: 是否儲存圖片
         verbose: 是否顯示詳細訊息
-        court_config_path: 場地設定 JSON 路徑
+        court_config_path: 場地設定 JSON 路徑（全域，所有影片共用）
+        court_config_dir: court_config 目錄（按 group_key 自動匹配）
     """
     print("="*70)
     print("批次測試發球偵測和發球員識別")
@@ -544,16 +545,21 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
     print(f"輸出目錄: {output_dir}")
     
     # 載入場地設定
-    court_config = load_court_config(court_config_path)
-    court_zones = None
-    if court_config:
-        exclusion_count = len(court_config.get('exclusion_zones', []))
+    # 全域 court_config（所有影片共用）
+    global_court_config = load_court_config(court_config_path)
+    global_court_zones = None
+    use_per_video_config = bool(court_config_dir and os.path.isdir(court_config_dir if court_config_dir else ''))
+
+    if global_court_config:
+        exclusion_count = len(global_court_config.get('exclusion_zones', []))
         print(f"場地設定: {court_config_path} (排除區域: {exclusion_count} 個)")
         try:
-            court_zones = CourtZones(court_config)
-            print(f"場地分區: 已建立 (net_y={court_zones.net_y})")
+            global_court_zones = CourtZones(global_court_config)
+            print(f"場地分區: 已建立 (net_y={global_court_zones.net_y})")
         except Exception as e:
             print(f"場地分區: 建立失敗 ({e})")
+    elif use_per_video_config:
+        print(f"場地設定: 按 group_key 自動匹配 ({court_config_dir})")
     else:
         print(f"場地設定: 未指定（不排除任何區域）")
     print()
@@ -578,7 +584,30 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
     results = []
     for i, (video_path, json_path, video_name) in enumerate(matches, 1):
         print(f"[{i}/{len(matches)}] 處理: {video_name}")
-        
+
+        # 決定本影片使用的 court_config
+        court_config = global_court_config
+        court_zones = global_court_zones
+
+        if not court_config and use_per_video_config:
+            parsed = parse_filename(video_name)
+            group_key = None
+            if parsed and parsed.get('group_key'):
+                group_key = parsed['group_key']
+            else:
+                # fallback: 從路徑中提取 group_key
+                group_key = extract_group_key_from_path(video_path)
+            if group_key:
+                auto_path = os.path.join(court_config_dir, f"{group_key}.json")
+                court_config = load_court_config(auto_path)
+                if court_config:
+                    try:
+                        court_zones = CourtZones(court_config)
+                    except Exception:
+                        court_zones = None
+                    if verbose:
+                        print(f"    [AutoMatch] {group_key}")
+
         result = process_single_video(
             video_path, json_path, output_dir,
             save_images=save_images,
@@ -760,6 +789,8 @@ def main():
                         help="輸出目錄 (預設: batch_test_output)")
     parser.add_argument("--court-config", type=str, default=None,
                         help="場地設定 JSON 路徑 (包含排除區域)")
+    parser.add_argument("--court-config-dir", type=str, default=None,
+                        help="court_config 目錄，自動按檔名 group_key 匹配")
     parser.add_argument("--no-images", action="store_true",
                         help="不儲存圖片（只輸出統計）")
     parser.add_argument("--verbose", action="store_true",
@@ -775,7 +806,8 @@ def main():
         output_dir=args.output,
         save_images=not args.no_images,
         verbose=args.verbose,
-        court_config_path=args.court_config
+        court_config_path=args.court_config,
+        court_config_dir=args.court_config_dir
     )
 
 

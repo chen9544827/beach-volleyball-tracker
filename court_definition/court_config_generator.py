@@ -154,7 +154,7 @@ def main(video_path, config_save_path):
             if exclusion_points:
                  g_final_config["exclusion_zones"].append({"polygon": exclusion_points})
                  cv2.polylines(current_drawing_frame, [np.array(exclusion_points)], True, (0, 0, 255), 2)
-                 print(f"  ✅ 已新增排除區域 #{len(g_final_config['exclusion_zones'])}")
+                 print(f"  [OK] 已新增排除區域 #{len(g_final_config['exclusion_zones'])}")
         elif key == ord('n'): break
         elif key == ord('q'): print("使用者取消操作，定義終止。"); cv2.destroyAllWindows(); return
     
@@ -181,7 +181,7 @@ def main(video_path, config_save_path):
         elif key == ord('q'): print("使用者取消操作，定義終止。"); cv2.destroyAllWindows(); return
             
     cv2.destroyAllWindows()
-    print("\n--- ✅ 定義完成，最終設定如下 ---")
+    print("\n--- [OK] 定義完成，最終設定如下 ---")
     print(json.dumps(g_final_config, indent=2))
 
     try:
