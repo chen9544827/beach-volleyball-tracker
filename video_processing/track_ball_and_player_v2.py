@@ -72,7 +72,7 @@ DEFAULT_IMGSZ = 1280
 
 
 def detect_ball(frame, ball_model, conf_thresh: float, background_ball_zones: List[Dict],
-                resolution_scale: float = 1.0) -> List[Dict]:
+                resolution_scale: float = 1.0, imgsz: int = None) -> List[Dict]:
     """
     偵測球的位置
 
@@ -94,7 +94,7 @@ def detect_ball(frame, ball_model, conf_thresh: float, background_ball_zones: Li
     max_ball_size = 50 * resolution_scale
 
     try:
-        results = ball_model(frame, conf=conf_thresh, classes=[0], verbose=False, imgsz=DEFAULT_IMGSZ)
+        results = ball_model(frame, conf=conf_thresh, classes=[0], verbose=False, imgsz=imgsz or DEFAULT_IMGSZ)
 
         if not results or not results[0].boxes:
             return detected_balls
@@ -148,7 +148,9 @@ def detect_and_filter_players(
     court_boundary_np: Optional[np.ndarray],
     exclusion_zones_np: List[np.ndarray],
     court_center_xy: Optional[tuple],
-    frame_size: Optional[tuple] = None
+    frame_size: Optional[tuple] = None,
+    iou_thresh: float = 0.6,
+    imgsz: int = None,
 ) -> List[Dict]:
     """
     偵測並過濾球員
@@ -176,7 +178,7 @@ def detect_and_filter_players(
         effective_center = (frame_size[0] / 2, frame_size[1] / 2 + frame_size[1] * 0.1)
 
     try:
-        results = player_pose_model(frame, conf=0.15, classes=[0], verbose=False, imgsz=DEFAULT_IMGSZ, max_det=100, iou=0.6)
+        results = player_pose_model(frame, conf=0.15, classes=[0], verbose=False, imgsz=imgsz or DEFAULT_IMGSZ, max_det=100, iou=iou_thresh)
 
         if not results or not results[0].boxes or not results[0].keypoints:
             return all_candidates
@@ -259,19 +261,70 @@ def _compute_iou(box1, box2):
     return inter / (a1 + a2 - inter)
 
 
+def _get_pose_for_crop(frame, pose_model, box, scale_factor=2.0, pad=15, imgsz: int = None):
+    """
+    裁切球員邊界框區域，放大後跑 pose model 取得關鍵點。
+
+    Args:
+        frame: 原始影格
+        pose_model: YOLO Pose 模型
+        box: [x1, y1, x2, y2] 球員框
+        scale_factor: 裁切區域放大倍率
+        pad: 邊界填充像素
+
+    Returns:
+        keypoints list [[x, y, conf], ...] 已映射回原始座標，失敗時返回空 list
+    """
+    import cv2
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+    x1p = max(0, x1 - pad)
+    y1p = max(0, y1 - pad)
+    x2p = min(w, x2 + pad)
+    y2p = min(h, y2 + pad)
+    crop = frame[y1p:y2p, x1p:x2p]
+    if crop.shape[0] < 10 or crop.shape[1] < 10:
+        return []
+    new_w = int(crop.shape[1] * scale_factor)
+    new_h = int(crop.shape[0] * scale_factor)
+    crop_up = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    try:
+        results = pose_model(crop_up, conf=0.03, classes=[0], verbose=False,
+                             imgsz=imgsz or DEFAULT_IMGSZ, max_det=5)
+        if (results and results[0].boxes is not None and
+                results[0].keypoints is not None and len(results[0].boxes) > 0):
+            kpts = results[0].keypoints[0]
+            if kpts.xy is not None and kpts.conf is not None:
+                kpts_xy = kpts.xy[0].cpu().numpy()
+                kpts_conf = kpts.conf[0].cpu().numpy()
+                keypoints = []
+                for kp_idx in range(kpts_xy.shape[0]):
+                    orig_x = float(kpts_xy[kp_idx, 0] / scale_factor) + x1p
+                    orig_y = float(kpts_xy[kp_idx, 1] / scale_factor) + y1p
+                    keypoints.append([orig_x, orig_y, float(kpts_conf[kp_idx])])
+                return keypoints
+    except Exception:
+        pass
+    return []
+
+
 def detect_supplementary_players(
     frame,
     det_model,
     pose_detections: List[Dict],
     iou_thresh: float = 0.4,
+    pose_model=None,
+    imgsz: int = None,
 ) -> List[Dict]:
     """
     Use YOLO detection model to find players missed by pose model.
     Returns only detections that don't overlap with existing pose detections.
+    If pose_model is provided, runs pose estimation on each found player crop
+    to obtain keypoints.
     """
     try:
         results = det_model(frame, conf=0.15, classes=[0], verbose=False,
-                            imgsz=DEFAULT_IMGSZ, max_det=100, iou=0.6)
+                            imgsz=imgsz or DEFAULT_IMGSZ, max_det=100, iou=0.6)
     except Exception as e:
         print(f"!! Exception in detect_supplementary_players: {e}", file=sys.stderr)
         return []
@@ -301,6 +354,15 @@ def detect_supplementary_players(
         if not matched:
             supplementary.append(det)
 
+    # 補跑 pose model 取得關鍵點（裁切 + 放大 2x）
+    if pose_model is not None:
+        for det in supplementary:
+            kps = _get_pose_for_crop(frame, pose_model, det['box_coords'],
+                                     scale_factor=4.0, imgsz=640)
+            if kps:
+                det['pose_keypoints'] = kps
+                det['detection_source'] = 'det_model_with_pose'
+
     return supplementary
 
 
@@ -311,6 +373,8 @@ def detect_far_side_players(
     existing_detections: List[Dict],
     net_y: float,
     scale_factor: float = 2.0,
+    iou_thresh: float = 0.6,
+    imgsz: int = None,
 ) -> List[Dict]:
     """
     Far-side retry: crop the region above net_y, upscale, and re-detect
@@ -356,7 +420,7 @@ def detect_far_side_players(
     # Try pose model on upscaled crop with very low conf
     try:
         results = pose_model(crop_upscaled, conf=0.03, classes=[0], verbose=False,
-                             imgsz=DEFAULT_IMGSZ, max_det=50, iou=0.6)
+                             imgsz=imgsz or DEFAULT_IMGSZ, max_det=50, iou=iou_thresh)
         if results and results[0].boxes is not None and results[0].keypoints is not None:
             for i in range(len(results[0].boxes)):
                 box = results[0].boxes[i]
@@ -395,7 +459,7 @@ def detect_far_side_players(
     if det_model is not None:
         try:
             results = det_model(crop_upscaled, conf=0.03, classes=[0], verbose=False,
-                                imgsz=DEFAULT_IMGSZ, max_det=50, iou=0.6)
+                                imgsz=imgsz or DEFAULT_IMGSZ, max_det=50, iou=iou_thresh)
             if results and results[0].boxes is not None:
                 for box in results[0].boxes:
                     x1 = int(box.xyxy[0][0].cpu().numpy() / scale_factor)
@@ -412,6 +476,15 @@ def detect_far_side_players(
                     })
         except Exception:
             pass
+
+    # 對 det_model 找到但無關鍵點的結果，補跑 pose model（裁切原始幀區域）
+    for nd in new_detections:
+        if not nd.get('pose_keypoints'):
+            kps = _get_pose_for_crop(frame, pose_model, nd['box_coords'],
+                                     scale_factor=4.0, imgsz=640)
+            if kps:
+                nd['pose_keypoints'] = kps
+                nd['detection_source'] = nd['detection_source'] + '_with_pose'
 
     # Deduplicate: remove new detections that overlap with existing ones
     filtered = []
@@ -500,6 +573,9 @@ def run_tracking_v2(
     use_sahi: bool = False,
     sahi_slice_size: int = 512,
     sahi_overlap: float = 0.2,
+    player_model_name: str = None,
+    player_iou: float = 0.6,
+    imgsz: int = None,
     verbose: bool = True
 ) -> str:
     """
@@ -525,16 +601,17 @@ def run_tracking_v2(
     import cv2
     
     # --- 載入模型 ---
-    player_model_path = os.path.join(MODELS_DIR, PLAYER_MODEL_NAME)
+    _player_name = player_model_name if player_model_name else PLAYER_MODEL_NAME
+    player_model_path = os.path.join(MODELS_DIR, _player_name)
     ball_model_path = os.path.join(MODELS_DIR, BALL_MODEL_NAME)
-    
+
     if not os.path.exists(player_model_path):
         raise FileNotFoundError(f"找不到選手模型: {player_model_path}")
     if not os.path.exists(ball_model_path):
         raise FileNotFoundError(f"找不到排球模型: {ball_model_path}")
-    
+
     if verbose:
-        print(f"[追蹤] 載入模型...")
+        print(f"[追蹤] 載入模型... (pose={_player_name}, iou={player_iou})")
     
     player_model = YOLO(player_model_path)
     ball_model = YOLO(ball_model_path)
@@ -618,6 +695,9 @@ def run_tracking_v2(
     # --- Resolution scale for pixel thresholds ---
     resolution_scale = video_height / 720.0 if video_height > 0 else 1.0
 
+    # --- imgsz: inference resolution (default 1280, can be set higher for small far-side players) ---
+    _imgsz = imgsz or DEFAULT_IMGSZ
+
     # --- 畫面中心 fallback（無 court_config 時使用）---
     frame_size = (video_width, video_height)
     if court_center_xy is None:
@@ -651,6 +731,7 @@ def run_tracking_v2(
         print(f"[追蹤] Video: {os.path.basename(video_path)}")
         print(f"[追蹤] Frames: {total_frames}, FPS: {fps:.1f}")
         print(f"[追蹤] Detection interval: every {detection_interval} frame(s)")
+        print(f"[追蹤] Inference imgsz: {_imgsz}")
     
     # --- 幀處理迴圈 ---
     all_frames_data = []
@@ -672,7 +753,7 @@ def run_tracking_v2(
             # 執行偵測
             ball_detections = detect_ball(
                 frame, ball_model, ball_conf_thresh, background_ball_zones,
-                resolution_scale=resolution_scale
+                resolution_scale=resolution_scale, imgsz=_imgsz
             )
 
             # Static ball filter: update history and remove static detections
@@ -692,13 +773,17 @@ def run_tracking_v2(
                 player_detections = detect_and_filter_players(
                     frame, player_model, player_conf_thresh,
                     court_boundary_np, exclusion_zones_np, court_center_xy,
-                    frame_size=frame_size
+                    frame_size=frame_size,
+                    iou_thresh=player_iou,
+                    imgsz=_imgsz,
                 )
 
             # Supplementary detection: find players missed by pose model
             if player_det_model is not None:
                 supplementary = detect_supplementary_players(
-                    frame, player_det_model, player_detections
+                    frame, player_det_model, player_detections,
+                    pose_model=player_model,
+                    imgsz=_imgsz,
                 )
                 if supplementary:
                     # Apply same filtering as pose detections
@@ -726,16 +811,24 @@ def run_tracking_v2(
                     if auto_court.net_y is not None:
                         effective_net_y = auto_court.net_y
 
-            # --- Hard filter with court_config boundary + margin ---
+            # --- Hard filter with court_config boundary + directional margin ---
+            # X (sideline): tight margin to exclude coaches/referees at the sides
+            # Y (baseline): loose margin to allow servers standing behind baseline
             elif court_boundary_np is not None:
-                import cv2 as _cv2
-                court_w = max(court_boundary_np[:, 0]) - min(court_boundary_np[:, 0])
-                court_margin = court_w * 0.15
+                court_xs = court_boundary_np[:, 0]
+                court_ys = court_boundary_np[:, 1]
+                court_w = float(max(court_xs) - min(court_xs))
+                court_h = float(max(court_ys) - min(court_ys))
+                x_margin = court_w * 0.08   # 8% sideline margin
+                y_margin = court_h * 0.30   # 30% baseline margin (serving area)
+                x_min = float(min(court_xs)) - x_margin
+                x_max = float(max(court_xs)) + x_margin
+                y_min = float(min(court_ys)) - y_margin
+                y_max = float(max(court_ys)) + y_margin
                 kept = []
                 for det in player_detections:
-                    pt = (float(det['center_point'][0]), float(det['center_point'][1]))
-                    signed_dist = _cv2.pointPolygonTest(court_boundary_np, pt, True)
-                    if signed_dist >= -court_margin:
+                    cx, cy = det['center_point']
+                    if x_min <= cx <= x_max and y_min <= cy <= y_max:
                         kept.append(det)
                 player_detections = kept
 
@@ -743,7 +836,9 @@ def run_tracking_v2(
             if effective_net_y is not None:
                 far_retry = detect_far_side_players(
                     frame, player_model, player_det_model,
-                    player_detections, effective_net_y
+                    player_detections, effective_net_y,
+                    iou_thresh=player_iou,
+                    imgsz=_imgsz,
                 )
                 if far_retry:
                     # Filter far-retry results through auto_court or court boundary
@@ -963,6 +1058,10 @@ if __name__ == '__main__':
                         help="SAHI slice size in pixels (default 512)")
     parser.add_argument("--sahi_overlap", type=float, default=0.2,
                         help="SAHI slice overlap ratio (default 0.2)")
+    parser.add_argument("--pose-model", type=str, default=None,
+                        help=f"球員 Pose 模型檔名（預設: {PLAYER_MODEL_NAME}）")
+    parser.add_argument("--player-iou", type=float, default=0.6,
+                        help="球員偵測 NMS IoU 門檻（預設 0.6，降低可抑制同人重複框）")
     parser.add_argument("--quiet", action="store_true", help="安靜模式")
     
     args = parser.parse_args()
@@ -1007,6 +1106,8 @@ if __name__ == '__main__':
             use_sahi=args.use_sahi,
             sahi_slice_size=args.sahi_slice_size,
             sahi_overlap=args.sahi_overlap,
+            player_model_name=args.pose_model,
+            player_iou=args.player_iou,
             verbose=not args.quiet
         )
         print(f"完成！輸出: {output_path}")

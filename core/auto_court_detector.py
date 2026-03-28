@@ -254,11 +254,10 @@ class AutoCourtDetector:
         """
         Auto-generate exclusion zones from court boundary.
 
-        Creates up to 4 exclusion zones (left, right, top, bottom) covering
-        areas outside the court's active region (court + service area buffer).
-
-        The active region is the court boundary expanded by margins.
-        Everything outside the active region but inside the frame is an exclusion zone.
+        Creates up to 6 exclusion zones:
+        - Left/Right: areas outside active region on left/right sides
+        - Top/Bottom: areas above far baseline / below near baseline
+        - Net-post left/right: referee stand areas around net endpoints
 
         Args:
             keypoints: (6, 2) keypoint positions
@@ -275,6 +274,8 @@ class AutoCourtDetector:
         fr = keypoints[KP_FAR_RIGHT]
         nl = keypoints[KP_NEAR_LEFT]
         nr = keypoints[KP_NEAR_RIGHT]
+        net_l = keypoints[KP_NET_LEFT]
+        net_r = keypoints[KP_NET_RIGHT]
 
         # Court pixel height
         court_h = max(abs(nl[1] - fl[1]), abs(nr[1] - fr[1]))
@@ -286,7 +287,6 @@ class AutoCourtDetector:
         near_width = abs(nr[0] - nl[0])
 
         # Expanded active region corners
-        # Far side: expand up by margin_far * court_h, left/right by margin_lr * far_width
         far_expand_y = margin_far * court_h
         far_expand_x = margin_lr * far_width
         near_expand_y = margin_near * court_h
@@ -299,12 +299,12 @@ class AutoCourtDetector:
         active_nr = (min(frame_w, nr[0] + near_expand_x), min(frame_h, nr[1] + near_expand_y))
 
         zones = []
-        min_size = 20  # Minimum exclusion zone dimension
+        min_size = 5  # Minimum exclusion zone dimension (lowered to catch tight edges)
 
         # Left exclusion zone: frame left edge to active left boundary
         left_x_far = active_fl[0]
         left_x_near = active_nl[0]
-        if min(left_x_far, left_x_near) > min_size:
+        if max(left_x_far, left_x_near) > min_size:
             zone = {
                 'polygon': [
                     [0, int(round(active_fl[1]))],
@@ -318,7 +318,7 @@ class AutoCourtDetector:
         # Right exclusion zone: active right boundary to frame right edge
         right_x_far = active_fr[0]
         right_x_near = active_nr[0]
-        if (frame_w - max(right_x_far, right_x_near)) > min_size:
+        if (frame_w - min(right_x_far, right_x_near)) > min_size:
             zone = {
                 'polygon': [
                     [int(round(right_x_far)), int(round(active_fr[1]))],
@@ -338,19 +338,6 @@ class AutoCourtDetector:
                     [frame_w, 0],
                     [frame_w, int(round(top_y))],
                     [0, int(round(top_y))],
-                ]
-            }
-            zones.append(zone)
-
-        # Bottom exclusion zone: active near boundary to frame bottom
-        bottom_y = max(active_nl[1], active_nr[1])
-        if (frame_h - bottom_y) > min_size:
-            zone = {
-                'polygon': [
-                    [0, int(round(bottom_y))],
-                    [frame_w, int(round(bottom_y))],
-                    [frame_w, frame_h],
-                    [0, frame_h],
                 ]
             }
             zones.append(zone)

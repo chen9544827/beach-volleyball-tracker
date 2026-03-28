@@ -155,6 +155,7 @@ class ReceptionDetector:
         net_y: float,
         serving_side: str,
         court_zones=None,
+        image_height: int = 720,
     ) -> Dict[str, Any]:
         """
         從擊球幀開始追蹤球，偵測接球事件
@@ -189,11 +190,18 @@ class ReceptionDetector:
             'time_to_reception': None,
             'ball_crossed_net': False,
             'confidence': 0.0,
+            'is_ace': False,
+            'landing_zone': None,
+            'landing_position': None,
         }
 
         hit_frame_id = serve_event.get('hit_frame_id')
         if hit_frame_id is None:
             return result
+
+        # 解析度縮放因子（所有像素閾值以 720p 為基準）
+        resolution_scale = image_height / 720.0
+        scaled_ball_player_dist = self.ball_player_dist * resolution_scale
 
         # 接球方 = 發球方的對面
         receiving_side = 'near' if serving_side == 'far' else 'far'
@@ -210,6 +218,7 @@ class ReceptionDetector:
         prev_ball_pos = None
         prev_prev_ball_pos = None
         prev_speed = None
+        post_net_ball_positions = []  # 記錄過網後的球位置（供 ace 落點偵測使用）
 
         for frame_idx in range(hit_frame_id + 1, end_idx + 1):
             if frame_idx >= total_frames:
@@ -232,6 +241,10 @@ class ReceptionDetector:
                 elif serving_side == 'far' and ball_pos[1] >= net_y:
                     ball_crossed_net = True
                     result['ball_crossed_net'] = True
+
+            # 追蹤過網後的球位置（供 ace 落點偵測使用）
+            if ball_crossed_net:
+                post_net_ball_positions.append((frame_idx, ball_pos))
 
             # 只在球跨過網線且超過最小幀數後才偵測接球
             frames_since_hit = frame_idx - hit_frame_id
@@ -263,7 +276,7 @@ class ReceptionDetector:
             # 找最近的接球方球員
             players = _get_player_positions(frame)
             nearest = _find_nearest_player(
-                ball_pos, players, self.ball_player_dist, receiving_side, net_y
+                ball_pos, players, scaled_ball_player_dist, receiving_side, net_y
             )
 
             # 組合判斷
@@ -293,6 +306,10 @@ class ReceptionDetector:
                     zone = court_zones.get_reception_zone(ball_pos, receiving_side)
                     result['reception_zone'] = zone
 
+                # 有接球：落點等於接球位置（非 ace）
+                result['is_ace'] = False
+                result['landing_zone'] = result.get('reception_zone')
+                result['landing_position'] = list(ball_pos)
                 return result
 
             # 更新歷史
@@ -300,6 +317,15 @@ class ReceptionDetector:
             prev_ball_pos = ball_pos
             if current_speed is not None:
                 prev_speed = current_speed
+
+        # Ace 落點偵測：球過網但無人接球
+        if ball_crossed_net and post_net_ball_positions:
+            # 找 Y 值最大的幀（球最接近地面）
+            _, landing_pos = max(post_net_ball_positions, key=lambda x: x[1][1])
+            result['is_ace'] = True
+            result['landing_position'] = list(landing_pos)
+            if court_zones is not None:
+                result['landing_zone'] = court_zones.get_reception_zone(landing_pos, receiving_side)
 
         return result
 

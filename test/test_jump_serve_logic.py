@@ -154,6 +154,107 @@ def test_multiple_equal_sequences():
     print("  [OK] 通過")
 
 
+def _make_frame_with_ankle(frame_id, player_center, ankle_y, conf=0.9):
+    """建立包含腳踝關鍵點的模擬幀資料"""
+    kps = [[0, 0, 0.0]] * 17
+    kps[15] = [player_center[0], ankle_y, conf]  # left ankle
+    kps[16] = [player_center[0], ankle_y, conf]  # right ankle
+    return {
+        'frame_id': frame_id,
+        'ball_detections': [],
+        'player_detections': [{
+            'center_point': list(player_center),
+            'confidence': 0.9,
+            'pose_keypoints': kps
+        }]
+    }
+
+
+def test_pre_toss_baseline_used():
+    """測試案例 8：助跑後正確判定跳發（拋球前基準線應取代前 1/3 幀）"""
+    from core.jump_serve_detector import analyze_jump_serve
+
+    print("\n測試 8: 助跑後正確判定跳發（拋球前基準線）")
+
+    player_center = [400, 400]
+    toss_frame = 50
+    hit_frame = 65
+
+    frames = []
+    # 幀 20-39：助跑，腳踝 Y 較高且略有變化（600，不穩定）
+    for fid in range(20, 40):
+        frames.append(_make_frame_with_ankle(fid, player_center, 600))
+    # 幀 40-49：拋球前站立靜止，腳踝 Y 穩定在 580
+    for fid in range(40, 50):
+        frames.append(_make_frame_with_ankle(fid, player_center, 580))
+    # 幀 50-55：起跳，腳踝 Y 下降
+    for i, fid in enumerate(range(50, 56)):
+        frames.append(_make_frame_with_ankle(fid, player_center, 580 - i * 20))
+    # 幀 56-65：最高點，腳踝 Y 固定 440
+    for fid in range(56, 66):
+        frames.append(_make_frame_with_ankle(fid, player_center, 440))
+
+    serve_event = {'toss_start_frame': toss_frame, 'hit_frame_id': hit_frame}
+    server_result = {
+        'server': {'center_point': player_center},
+        'found_frame_id': 20
+    }
+
+    result = analyze_jump_serve(frames, serve_event, server_result, verbose=False)
+
+    print(f"  結果: is_jump_serve={result['is_jump_serve']}")
+    print(f"  baseline_ankle_y={result.get('baseline_ankle_y')}")
+    print(f"  jump_height={result.get('jump_height')}")
+
+    assert result['is_jump_serve'] == True, f"應判定為跳發，實際: {result}"
+    # 基準線應接近 580（拋球前幀），而非助跑幀的 600
+    baseline = result.get('baseline_ankle_y', 0)
+    assert 575 <= baseline <= 585, f"基準線應來自拋球前 (≈580)，實際: {baseline}"
+    print("  [OK] 通過")
+
+
+def test_fallback_baseline_with_confidence_cap():
+    """測試案例 9：拋球前幀不足時 fallback，且幀數不足時信心度上限 0.7"""
+    from core.jump_serve_detector import analyze_jump_serve
+
+    print("\n測試 9: 短助跑仍有足夠基準線（fallback + 信心度上限）")
+
+    player_center = [400, 400]
+    toss_frame = 50
+    hit_frame = 54
+
+    frames = []
+    # 幀 48-49：拋球前僅 2 幀（< 3，觸發 fallback）
+    for fid in range(48, 50):
+        frames.append(_make_frame_with_ankle(fid, player_center, 570))
+    # 幀 50-51：起跳
+    frames.append(_make_frame_with_ankle(50, player_center, 540))
+    frames.append(_make_frame_with_ankle(51, player_center, 490))
+    # 幀 52-54：最高點，3 幀連續 < threshold → 觸發 is_jump_serve
+    for fid in range(52, 55):
+        frames.append(_make_frame_with_ankle(fid, player_center, 430))
+    # 總計 7 幀 (< 8) → 信心度上限 0.7
+
+    serve_event = {'toss_start_frame': toss_frame, 'hit_frame_id': hit_frame}
+    server_result = {
+        'server': {'center_point': player_center},
+        'found_frame_id': 48
+    }
+
+    result = analyze_jump_serve(frames, serve_event, server_result, verbose=False)
+
+    print(f"  結果: is_jump_serve={result['is_jump_serve']}")
+    print(f"  baseline_ankle_y={result.get('baseline_ankle_y')}")
+    print(f"  jump_height={result.get('jump_height')}")
+    print(f"  confidence={result.get('confidence')}")
+
+    assert result['is_jump_serve'] == True, f"應判定為跳發，實際: {result}"
+    assert result.get('confidence', 1.0) <= 0.7, (
+        f"幀數不足（<8 幀）時信心度應 <= 0.7，實際: {result.get('confidence')}"
+    )
+    print("  [OK] 通過")
+
+
 if __name__ == '__main__':
     print("="*70)
     print("跳發邏輯單元測試 - 連續序列偵測演算法")
@@ -167,6 +268,8 @@ if __name__ == '__main__':
         test_single_frame()
         test_with_gaps()
         test_multiple_equal_sequences()
+        test_pre_toss_baseline_used()
+        test_fallback_baseline_with_confidence_cap()
 
         print("\n" + "="*70)
         print("[SUCCESS] 所有測試通過！")

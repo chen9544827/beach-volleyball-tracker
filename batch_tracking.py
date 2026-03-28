@@ -63,11 +63,12 @@ def batch_tracking(
     detection_interval: int = 1,
     use_ball_tracker: bool = True,
     max_occlusion_frames: int = 15,
+    imgsz: int = None,
     verbose: bool = True
 ):
     """
     批次追蹤所有影片
-    
+
     Args:
         video_dir: 影片目錄
         output_dir: 輸出目錄
@@ -75,6 +76,7 @@ def batch_tracking(
         detection_interval: 偵測間隔
         use_ball_tracker: 是否使用球追蹤器
         max_occlusion_frames: 最大遮擋幀數
+        imgsz: 推理解析度（預設 1280，可設 1920 改善遠端小目標偵測）
         verbose: 是否顯示詳細訊息
     """
     print("="*70)
@@ -128,6 +130,7 @@ def batch_tracking(
                 detection_interval=detection_interval,
                 use_ball_tracker=use_ball_tracker,
                 max_occlusion_frames=max_occlusion_frames,
+                imgsz=imgsz,
                 verbose=verbose
             )
             
@@ -187,11 +190,13 @@ def main():
                         help="最大遮擋幀數（預設 15）")
     parser.add_argument("--no-tracker", action="store_true",
                         help="停用球追蹤器")
+    parser.add_argument("--imgsz", type=int, default=None,
+                        help="推理解析度（預設 1280，設 1920 可改善遠端小目標偵測）")
     parser.add_argument("--quiet", action="store_true",
                         help="安靜模式（減少輸出）")
-    
+
     args = parser.parse_args()
-    
+
     batch_tracking(
         video_dir=args.video_dir,
         output_dir=args.output_dir,
@@ -199,6 +204,7 @@ def main():
         detection_interval=args.detection_interval,
         use_ball_tracker=not args.no_tracker,
         max_occlusion_frames=args.max_occlusion,
+        imgsz=args.imgsz,
         verbose=not args.quiet
     )
 

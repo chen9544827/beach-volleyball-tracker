@@ -271,6 +271,13 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
     """
     video_name = os.path.splitext(os.path.basename(video_path))[0]
 
+    # 提前取得影片高度（供 analyze_serve_events_v2 解析度縮放使用）
+    image_height = 720  # 預設值
+    _cap = cv2.VideoCapture(video_path)
+    if _cap.isOpened():
+        image_height = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        _cap.release()
+
     result = {
         'video_name': video_name,
         'status': 'unknown',
@@ -290,8 +297,11 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         'time_to_reception': None,
         'reception_confidence': 0,
         'ball_crossed_net': False,
+        'is_ace': False,
+        'landing_zone': None,
+        'landing_position': None,
     }
-    
+
     try:
         # 載入追蹤數據（包含驗證）
         data = load_tracking_data(json_path)
@@ -301,6 +311,10 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
             result['status'] = 'no_frames'
             result['error'] = 'JSON 中沒有幀資料'
             return result
+
+        # 計算球偵測率
+        frames_with_ball = sum(1 for fr in frames_data if fr.get('ball_detections'))
+        result['ball_detection_rate'] = frames_with_ball / len(frames_data) if frames_data else 0
 
     except ValidationError as e:
         result['status'] = 'error'
@@ -315,12 +329,18 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
     try:
         
         # 發球偵測
+        # net_y 傳入 serve_detector 以啟用 [Method C] net_y 約束：
+        # 拋球起點需在 net_y + margin 以上，過濾接球反彈的假陽性
+        serve_config = {'hit_v': 40.0, 'toss_vy': 8.0}
+        if court_config and 'net_y' in court_config:
+            serve_config['net_y'] = court_config['net_y']
         serve_events = analyze_serve_events_v2(
             frames_data,
-            config={'hit_v': 40.0, 'toss_vy': 8.0},
+            config=serve_config,
             use_dynamic_threshold=True,
             first_only=True,
-            log_prefix="" if verbose else None
+            log_prefix="" if verbose else None,
+            image_height=image_height
         )
         
         if not serve_events:
@@ -332,13 +352,7 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         result['toss_frame'] = serve_event.get('toss_start_frame')
         result['hit_frame'] = serve_event.get('hit_frame_id')
         result['hit_speed'] = serve_event.get('hit_speed', 0)
-        
-        # 取得影片高度
-        cap = cv2.VideoCapture(video_path)
-        image_height = 720  # 預設值
-        if cap.isOpened():
-            image_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+
         # 發球員識別（使用 lookback 方法）
         server_result = analyze_serve_player(
             frames_data=frames_data,
@@ -360,7 +374,8 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
             serve_event=serve_event,
             server_result=server_result,
             court_config=court_config,
-            verbose=verbose
+            verbose=verbose,
+            image_height=image_height
         )
         
         result['serve_type'] = jump_result.get('serve_type', 'unknown')
@@ -404,12 +419,16 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
                 result['time_to_reception'] = reception_result.get('time_to_reception')
                 result['reception_confidence'] = reception_result.get('confidence', 0)
                 result['ball_crossed_net'] = reception_result.get('ball_crossed_net', False)
+                result['is_ace'] = reception_result.get('is_ace', False)
+                result['landing_zone'] = reception_result.get('landing_zone')
+                result['landing_position'] = reception_result.get('landing_position')
             except Exception as e:
                 if verbose:
                     print(f"    [WARNING] Reception detection failed: {e}")
 
         # 儲存圖片
         if save_images:
+            cap = cv2.VideoCapture(video_path)
             if cap.isOpened():
                 # 找到的幀圖片（球員與球重疊的幀）
                 found_frame_id = server_result.get('found_frame_id')
@@ -524,7 +543,8 @@ def find_matching_files(video_dir: str, json_dir: str) -> list:
 
 def batch_test(video_dir: str, json_dir: str, output_dir: str,
                save_images: bool = True, verbose: bool = False,
-               court_config_path: str = None, court_config_dir: str = None):
+               court_config_path: str = None, court_config_dir: str = None,
+               export_excel: bool = False):
     """
     批次測試整個資料夾
 
@@ -752,6 +772,11 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
         export_to_csv(export_rows, csv_path)
         print(f"CSV 結果已儲存: {csv_path}")
 
+        if export_excel:
+            excel_path = os.path.join(output_dir, 'batch_results.xlsx')
+            export_to_excel(export_rows, excel_path)
+            print(f"Excel 結果已儲存: {excel_path}")
+
         # Also export summary JSON
         summary_export_path = os.path.join(output_dir, 'batch_results_summary.json')
         export_summary_json(export_rows, summary_export_path)
@@ -807,7 +832,8 @@ def main():
         save_images=not args.no_images,
         verbose=args.verbose,
         court_config_path=args.court_config,
-        court_config_dir=args.court_config_dir
+        court_config_dir=args.court_config_dir,
+        export_excel=args.export_excel,
     )
 
 

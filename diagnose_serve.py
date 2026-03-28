@@ -177,20 +177,20 @@ def diagnose_video(video_name: str, json_path: str):
     # 分析軌跡
     analysis = analyze_ball_trajectory(frames_data)
     
-    print(f"\n📊 基本統計:")
+    print(f"\n[統計] 基本統計:")
     print(f"  總幀數: {analysis['total_frames']}")
     print(f"  有球幀數: {analysis['frames_with_ball']} ({100*analysis['frames_with_ball']/analysis['total_frames']:.1f}%)")
     
     # 速度統計
     if analysis['speeds']:
         speeds = [s['speed'] for s in analysis['speeds']]
-        print(f"\n📈 速度統計:")
+        print(f"\n[速度] 速度統計:")
         print(f"  平均速度: {np.mean(speeds):.1f}")
         print(f"  最大速度: {np.max(speeds):.1f}")
         print(f"  90百分位: {np.percentile(speeds, 90):.1f}")
     
     # 向上移動序列
-    print(f"\n⬆️ 向上移動序列 (可能的拋球):")
+    print(f"\n[拋球] 向上移動序列 (可能的拋球):")
     if analysis['upward_sequences']:
         for i, seq in enumerate(analysis['upward_sequences'][:10]):  # 最多顯示10個
             print(f"  {i+1}. 幀 {seq['frames'][0]}-{seq.get('end_frame', seq['frames'][-1])}, "
@@ -199,7 +199,7 @@ def diagnose_video(video_name: str, json_path: str):
         print("  沒有偵測到向上移動序列！")
     
     # 高速事件
-    print(f"\n⚡ 高速事件 (速度 > 30):")
+    print(f"\n[擊球] 高速事件 (速度 > 30):")
     if analysis['high_speed_events']:
         for i, event in enumerate(analysis['high_speed_events'][:15]):  # 最多顯示15個
             h_ratio = abs(event['vx']) / (abs(event['vy']) + 1e-6)
@@ -211,7 +211,7 @@ def diagnose_video(video_name: str, json_path: str):
     
     # 潛在發球
     potential_serves = find_potential_serves(analysis)
-    print(f"\n🎯 潛在發球事件:")
+    print(f"\n[結果] 潛在發球事件:")
     if potential_serves:
         for i, serve in enumerate(potential_serves):
             print(f"  {i+1}. 拋球: 幀 {serve['toss_start']}-{serve['toss_end']} "
@@ -227,32 +227,32 @@ def diagnose_video(video_name: str, json_path: str):
         print("    - 拋球和擊球之間的時間間隔不對")
     
     # 建議
-    print(f"\n💡 診斷建議:")
+    print(f"\n[建議] 診斷建議:")
     
     if not analysis['upward_sequences']:
-        print("  ⚠️ 沒有向上移動序列 - 可能需要降低 toss_vy 閾值")
+        print("  [!] 沒有向上移動序列 - 可能需要降低 toss_vy 閾值")
     elif all(seq['max_vy'] < 8 for seq in analysis['upward_sequences']):
-        print(f"  ⚠️ 所有向上移動的速度都很低 (最大: {max(seq['max_vy'] for seq in analysis['upward_sequences']):.1f})")
+        print(f"  [!] 所有向上移動的速度都很低 (最大: {max(seq['max_vy'] for seq in analysis['upward_sequences']):.1f})")
         print("     建議降低 toss_vy 閾值到 5.0 或更低")
-    
+
     if not analysis['high_speed_events']:
-        print("  ⚠️ 沒有高速事件 - 可能需要降低 hit_v 閾值")
+        print("  [!] 沒有高速事件 - 可能需要降低 hit_v 閾值")
     elif all(event['speed'] < 40 for event in analysis['high_speed_events']):
         max_speed = max(event['speed'] for event in analysis['high_speed_events'])
-        print(f"  ⚠️ 所有高速事件速度都 < 40 (最大: {max_speed:.1f})")
+        print(f"  [!] 所有高速事件速度都 < 40 (最大: {max_speed:.1f})")
         print(f"     建議降低 hit_v 閾值到 {max_speed * 0.7:.1f}")
-    
+
     # 檢查水平速度過濾
-    high_h_ratio_events = [e for e in analysis['high_speed_events'] 
+    high_h_ratio_events = [e for e in analysis['high_speed_events']
                           if abs(e['vx']) / (abs(e['vy']) + 1e-6) > 2.5]
     if high_h_ratio_events and not potential_serves:
-        print(f"  ⚠️ 有 {len(high_h_ratio_events)} 個高速事件被水平比例過濾掉")
+        print(f"  [!] 有 {len(high_h_ratio_events)} 個高速事件被水平比例過濾掉")
         print("     可能需要調高 hit_h_ratio 閾值")
-    
-    low_h_ratio_events = [e for e in analysis['high_speed_events'] 
+
+    low_h_ratio_events = [e for e in analysis['high_speed_events']
                           if abs(e['vx']) / (abs(e['vy']) + 1e-6) < 0.3]
     if low_h_ratio_events and not potential_serves:
-        print(f"  ⚠️ 有 {len(low_h_ratio_events)} 個高速事件水平速度太低")
+        print(f"  [!] 有 {len(low_h_ratio_events)} 個高速事件水平速度太低")
         print("     可能需要降低 min_hit_horizontal_ratio")
     
     return analysis, potential_serves

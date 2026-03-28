@@ -207,3 +207,22 @@ nul
 models/
 predict_output/
 court_configs/backup/
+
+# 嵌套 git repo（子專案，使用 submodule 管理）
+fast-volleyball-tracking-inference/
+vball-net/
+vball-net-pytorch/
+
+# 模型與大型二進位檔案
+*.onnx
+*.keras
+*.h5
+*.pb
+*.tflite
+*.pth
+
+# 輸出結果（分析結果與標注）
+output/
+
+# Claude Code memory（本地個人設定，不應共用）
+.claude/memory/

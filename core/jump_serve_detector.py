@@ -133,6 +133,7 @@ def analyze_jump_serve(
     jump_threshold: float = 30.0,
     min_jump_frames: int = 3,
     ground_y: float = None,
+    max_match_distance: float = 150.0,
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
@@ -210,7 +211,7 @@ def analyze_jump_serve(
             continue
         
         frame_data = frame_map[frame_id]
-        server_player = find_server_in_frame(frame_data, server_center)
+        server_player = find_server_in_frame(frame_data, server_center, max_match_distance)
         
         if server_player is None:
             continue
@@ -245,17 +246,30 @@ def analyze_jump_serve(
     if ground_y is not None:
         baseline_ankle_y = ground_y
         if verbose:
-            print(f"[跳發分析] 使用場地設定的地面 Y: {ground_y:.1f}")
+            print(f"[跳發分析] 使用指定的地面 Y: {ground_y:.1f}")
     else:
-        # 使用起始幀的腳踝位置作為基準線
+        # 使用起始幀的腳踝位置作為基準線（球員站在地面時的腳踝 Y）
         if not ankle_y_values:
             result['error'] = '無有效腳踝 Y 座標資料'
             return result
 
-        baseline_frames = min(5, len(ankle_y_values) // 3)
-        baseline_ankle_y = np.mean(ankle_y_values[:baseline_frames])
-        if verbose:
-            print(f"[跳發分析] 使用動態估算的地面 Y: {baseline_ankle_y:.1f}")
+        # 優先使用拋球前 5-10 幀的腳踝 Y（發球員此時站立靜止，是最可靠的地面參考）
+        pre_toss_entries = [
+            t for t in ankle_trajectory
+            if (toss_frame_id - 10) <= t['frame_id'] <= (toss_frame_id - 1)
+        ]
+
+        if len(pre_toss_entries) >= 3:
+            baseline_ankle_y = float(np.median([t['ankle_y'] for t in pre_toss_entries]))
+            if verbose:
+                print(f"[跳發分析] 動態基準線 (拋球前 {len(pre_toss_entries)} 幀中位數): {baseline_ankle_y:.1f}")
+        else:
+            # Fallback：前 1/3 幀中位數（助跑期間拋球前資料不足時）
+            baseline_count = max(3, len(ankle_y_values) // 3)
+            baseline_values = ankle_y_values[:baseline_count]
+            baseline_ankle_y = float(np.median(baseline_values))
+            if verbose:
+                print(f"[跳發分析] 動態基準線 (前 {baseline_count} 幀 fallback): {baseline_ankle_y:.1f}")
 
     result['baseline_ankle_y'] = float(baseline_ankle_y)
 
@@ -344,14 +358,18 @@ def analyze_jump_serve(
     timing_score = 1.0 if 0 <= frames_before_hit <= 15 else 0.7
     
     result['confidence'] = (height_score * 0.5 + duration_score * 0.3 + timing_score * 0.2)
-    
+
+    # 若有效腳踝幀數不足，降低信心度上限（數據不足，結果不可靠）
+    if len(ankle_trajectory) < 8:
+        result['confidence'] = min(result['confidence'], 0.7)
+
     if verbose:
         print(f"[跳發分析] [OK] 判定為跳發")
         print(f"[跳發分析] 信心度: {result['confidence']:.2f}")
         print(f"[跳發分析] 跳躍開始: frame {jump_start}")
         print(f"[跳發分析] 最高點: frame {peak_frame}")
         print(f"[跳發分析] 連續跳躍幀: {max_consecutive}")
-    
+
     return result
 
 
@@ -360,20 +378,22 @@ def classify_serve_type(
     serve_event: Dict,
     server_result: Dict,
     court_config: Dict = None,
+    image_height: int = 720,
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
     分類發球類型（跳發 vs 站發）
-    
+
     這是主要的對外接口
-    
+
     Args:
         frames_data: 所有幀資料
         serve_event: 發球事件
         server_result: 發球員識別結果
         court_config: 場地設定（用於估算地面位置）
+        image_height: 影像高度（用於解析度正規化，預設 720）
         verbose: 是否輸出詳細資訊
-        
+
     Returns:
         {
             'serve_type': 'jump' 或 'standing',
@@ -383,37 +403,31 @@ def classify_serve_type(
             'details': {...}
         }
     """
-    # 從場地設定估算地面 Y 座標
+    # 解析度縮放因子（所有像素閾值以 720p 為基準）
+    resolution_scale = image_height / 720.0
+
+    # 不使用場地邊線作為 ground_y，改用球員實際腳踝位置的動態基準線
+    # 場地邊線 Y 與球員腳踝 Y 差距太大，會造成誤判
     ground_y = None
-    if court_config:
-        boundary = court_config.get('court_boundary_polygon', [])
-        if len(boundary) >= 4:
-            # 取得場地的上下邊界
-            y_values = [pt[1] for pt in boundary]
-            ground_y_far = min(y_values)   # 遠端（畫面上方）
-            ground_y_near = max(y_values)  # 近端（畫面下方）
-            
-            # 根據發球員位置判斷使用哪個地面
-            server_info = server_result.get('server')
-            if server_info:
-                server_y = server_info.get('center_point', [0, 0])[1]
-                mid_y = (ground_y_far + ground_y_near) / 2
-                
-                if server_y < mid_y:
-                    ground_y = ground_y_far  # 發球員在遠端
-                else:
-                    ground_y = ground_y_near  # 發球員在近端
-    
+
+    # 跳躍閾值隨解析度縮放
+    jump_threshold = 30.0 * resolution_scale
+
+    if verbose:
+        print(f"[跳發分析] 解析度縮放: {resolution_scale:.2f} (height={image_height})")
+        print(f"[跳發分析] 跳躍閾值: {jump_threshold:.1f}px")
+
     analysis = analyze_jump_serve(
         frames_data=frames_data,
         serve_event=serve_event,
         server_result=server_result,
-        jump_threshold=30.0,  # 30 像素作為跳躍閾值
+        jump_threshold=jump_threshold,
         min_jump_frames=3,
         ground_y=ground_y,
+        max_match_distance=150.0 * resolution_scale,
         verbose=verbose
     )
-    
+
     return {
         'serve_type': 'jump' if analysis['is_jump_serve'] else 'standing',
         'is_jump_serve': analysis['is_jump_serve'],

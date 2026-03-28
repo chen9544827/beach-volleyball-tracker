@@ -734,6 +734,10 @@ def analyze_serve_player(
         'server': None,
     }
     
+    # 收集所有方法的結果，最後選信心度最高的
+    MIN_CONFIDENCE = 0.4  # 低於此值視為不可靠，繼續嘗試其他方法
+    candidates = []  # (confidence, result_dict)
+
     # 方法 1：Lookback（推薦）- 從拋球幀往回找
     if method == 'lookback' and toss_frame_id is not None:
         lookback_result = find_server_with_lookback(
@@ -743,30 +747,31 @@ def analyze_serve_player(
             overlap_threshold=100.0,  # 球員中心到球 100 像素內算重疊
             exclusion_zones=exclusion_zones
         )
-        
-        result['lookback_result'] = lookback_result
-        result['found_frame_id'] = lookback_result.get('found_frame_id')
-        result['ball_position'] = lookback_result.get('ball_position')
-        result['final_server_index'] = lookback_result.get('server_index')
-        result['final_confidence'] = lookback_result.get('confidence', 0)
-        result['server'] = lookback_result.get('server')
-        result['distance_to_ball'] = lookback_result.get('distance_to_ball')
-        result['frames_searched'] = lookback_result.get('frames_searched', 0)
-        
+
         if lookback_result.get('server_index') is not None:
-            return result
-        
-        # 如果 lookback 失敗，退回使用拋球幀
-        method = 'toss_frame'
-    
+            lb_result = result.copy()
+            lb_result['lookback_result'] = lookback_result
+            lb_result['found_frame_id'] = lookback_result.get('found_frame_id')
+            lb_result['ball_position'] = lookback_result.get('ball_position')
+            lb_result['final_server_index'] = lookback_result.get('server_index')
+            lb_result['final_confidence'] = lookback_result.get('confidence', 0)
+            lb_result['server'] = lookback_result.get('server')
+            lb_result['distance_to_ball'] = lookback_result.get('distance_to_ball')
+            lb_result['frames_searched'] = lookback_result.get('frames_searched', 0)
+            candidates.append((lb_result['final_confidence'], lb_result))
+
+            # 如果信心度足夠高，直接返回
+            if lb_result['final_confidence'] >= MIN_CONFIDENCE:
+                return lb_result
+
     # 方法 2：使用拋球幀
-    if method == 'toss_frame' and toss_frame_id is not None and toss_position is not None:
+    if toss_frame_id is not None and toss_position is not None:
         toss_frame_data = None
         for frame in frames_data:
             if frame.get('frame_id') == toss_frame_id:
                 toss_frame_data = frame
                 break
-        
+
         if toss_frame_data:
             players = toss_frame_data.get('player_detections', [])
             toss_result = identify_server(
@@ -776,22 +781,26 @@ def analyze_serve_player(
                 method='combined',
                 image_height=image_height
             )
-            result['toss_result'] = toss_result
-            result['found_frame_id'] = toss_frame_id
-            result['ball_position'] = toss_position
-            result['final_server_index'] = toss_result['server_index']
-            result['final_confidence'] = toss_result['confidence']
-            result['server'] = toss_result.get('server')
-            return result
-    
-    # 方法 3：使用擊球幀（最後手段）
+            tf_result = result.copy()
+            tf_result['toss_result'] = toss_result
+            tf_result['found_frame_id'] = toss_frame_id
+            tf_result['ball_position'] = toss_position
+            tf_result['final_server_index'] = toss_result['server_index']
+            tf_result['final_confidence'] = toss_result['confidence']
+            tf_result['server'] = toss_result.get('server')
+            candidates.append((tf_result['final_confidence'], tf_result))
+
+            if tf_result['final_confidence'] >= MIN_CONFIDENCE:
+                return tf_result
+
+    # 方法 3：使用擊球幀
     if hit_frame_id is not None and hit_position is not None:
         hit_frame_data = None
         for frame in frames_data:
             if frame.get('frame_id') == hit_frame_id:
                 hit_frame_data = frame
                 break
-        
+
         if hit_frame_data:
             players = hit_frame_data.get('player_detections', [])
             hit_result = identify_server(
@@ -801,13 +810,20 @@ def analyze_serve_player(
                 method='combined',
                 image_height=image_height
             )
-            result['hit_result'] = hit_result
-            result['found_frame_id'] = hit_frame_id
-            result['ball_position'] = hit_position
-            result['final_server_index'] = hit_result['server_index']
-            result['final_confidence'] = hit_result['confidence']
-            result['server'] = hit_result.get('server')
-    
+            hf_result = result.copy()
+            hf_result['hit_result'] = hit_result
+            hf_result['found_frame_id'] = hit_frame_id
+            hf_result['ball_position'] = hit_position
+            hf_result['final_server_index'] = hit_result['server_index']
+            hf_result['final_confidence'] = hit_result['confidence']
+            hf_result['server'] = hit_result.get('server')
+            candidates.append((hf_result['final_confidence'], hf_result))
+
+    # 選擇信心度最高的結果
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
     return result
 
 

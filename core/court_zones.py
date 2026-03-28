@@ -92,7 +92,19 @@ class CourtZones:
         self.near_left = bottom_points[0]  # 近端左下
         self.near_right = bottom_points[1] # 近端右下
 
-        # 計算網線位置的左右端點（在 net_y 高度處內插）
+        # 計算有效 net_y（用於分區計算）
+        # 攝影機視角中，網子頂部 (net_y) 通常在 far baseline 上方
+        # 分區需要「地面上的分割線」，大約在 far 到 near 的 45% 位置
+        far_y = min(self.far_left[1], self.far_right[1])
+        near_y = max(self.near_left[1], self.near_right[1])
+        if self.net_y < far_y or self.net_y > near_y:
+            # net_y 在場地邊界外，計算有效分割線
+            # 因透視效果，網子在地面的投影約在 far-near 的 45% 處
+            self.effective_net_y = far_y + (near_y - far_y) * 0.45
+        else:
+            self.effective_net_y = self.net_y
+
+        # 計算網線位置的左右端點（使用 effective_net_y）
         self._compute_net_endpoints()
 
         # 預計算所有分區多邊形
@@ -103,10 +115,10 @@ class CourtZones:
         self._compute_serve_zones('near')
 
     def _compute_net_endpoints(self):
-        """計算網線與場地邊界的交點"""
+        """計算網線與場地邊界的交點（使用 effective_net_y 用於分區）"""
         # 左邊界線: far_left -> near_left
         # 右邊界線: far_right -> near_right
-        # 在 net_y 高度處找左右交點
+        # 在 effective_net_y 高度處找左右交點
 
         def intersect_at_y(p1, p2, y):
             """在給定 Y 座標處找邊界線的 X 座標"""
@@ -116,10 +128,11 @@ class CourtZones:
             t = max(0.0, min(1.0, t))
             return p1[0] + (p2[0] - p1[0]) * t
 
-        self.net_left_x = intersect_at_y(self.far_left, self.near_left, self.net_y)
-        self.net_right_x = intersect_at_y(self.far_right, self.near_right, self.net_y)
-        self.net_left = (self.net_left_x, self.net_y)
-        self.net_right = (self.net_right_x, self.net_y)
+        eny = self.effective_net_y
+        self.net_left_x = intersect_at_y(self.far_left, self.near_left, eny)
+        self.net_right_x = intersect_at_y(self.far_right, self.near_right, eny)
+        self.net_left = (self.net_left_x, eny)
+        self.net_right = (self.net_right_x, eny)
 
     def _compute_half_zones(self, side: str):
         """
@@ -285,11 +298,11 @@ class CourtZones:
 
         if side == 'far':
             top_y = self.far_left[1]
-            bot_y = self.net_y
+            bot_y = self.effective_net_y
             left_x = self.far_left[0]
             right_x = self.far_right[0]
         else:
-            top_y = self.net_y
+            top_y = self.effective_net_y
             bot_y = self.near_left[1]
             left_x = self.near_left[0]
             right_x = self.near_right[0]
@@ -362,4 +375,4 @@ class CourtZones:
         Returns:
             'far' 或 'near'
         """
-        return 'far' if position[1] < self.net_y else 'near'
+        return 'far' if position[1] < self.effective_net_y else 'near'

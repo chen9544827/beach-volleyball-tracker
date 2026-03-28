@@ -76,6 +76,8 @@ COLUMNS = [
     'time_to_reception',
     'reception_confidence',
     'ball_crossed_net',
+    'is_ace',
+    'landing_zone',
 
     # 品質指標
     'quality_grade',
@@ -145,6 +147,8 @@ def build_result_row(
         row['time_to_reception'] = reception_result.get('time_to_reception')
         row['reception_confidence'] = reception_result.get('confidence')
         row['ball_crossed_net'] = reception_result.get('ball_crossed_net')
+        row['is_ace'] = reception_result.get('is_ace', False)
+        row['landing_zone'] = reception_result.get('landing_zone')
 
     return row
 
@@ -237,6 +241,7 @@ def export_summary_json(results: List[Dict], output_path: str) -> str:
         serve_detected = sum(1 for r in results if r.get('serve_detected'))
         reception_detected = sum(1 for r in results if r.get('reception_detected'))
         jump_serves = sum(1 for r in results if r.get('is_jump_serve'))
+        ace_serves = sum(1 for r in results if r.get('is_ace'))
 
         grades = {}
         for r in results:
@@ -265,6 +270,7 @@ def export_summary_json(results: List[Dict], output_path: str) -> str:
             "reception_detection_rate": round(reception_detected / total, 3) if total > 0 else 0,
             "jump_serves": jump_serves,
             "standing_serves": serve_detected - jump_serves,
+            "ace_serves": ace_serves,
             "quality_grades": grades,
             "serve_zone_distribution": serve_zone_dist,
             "reception_zone_distribution": reception_zone_dist,
