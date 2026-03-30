@@ -83,6 +83,11 @@ COLUMNS = [
     'quality_grade',
     'ball_detection_rate',
     'status',
+
+    # 拋球高度診斷
+    'toss_height_px',
+    'min_toss_height_px',
+    'toss_height_ratio',
 ]
 
 
@@ -138,6 +143,14 @@ def build_result_row(
         row['jump_height'] = serve_result.get('jump_height')
         row['serve_zone'] = serve_result.get('serve_zone')
         row['serving_side'] = serve_result.get('serving_side')
+
+        # 拋球高度診斷欄位
+        toss_h = serve_result.get('toss_height_px')
+        min_toss_h = serve_result.get('min_toss_height_px')
+        row['toss_height_px'] = toss_h
+        row['min_toss_height_px'] = min_toss_h
+        if toss_h is not None and min_toss_h and min_toss_h > 0:
+            row['toss_height_ratio'] = round(toss_h / min_toss_h, 3)
 
     if reception_result:
         row['reception_detected'] = reception_result.get('reception_detected', False)

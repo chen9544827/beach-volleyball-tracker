@@ -145,10 +145,11 @@ class DataValidator:
                     f"警告: 幀 {frame_id} 的 player_detections 不是列表類型"
                 )
 
-        # 如果超過 50% 的幀不完整，輸出統計警告
-        if incomplete_frames > len(frames) * 0.5:
+        # 計算最高連續有球幀數（取代舊版 50% 中斷比例判斷）
+        max_consec = DataValidator.max_consecutive_ball_frames(frames)
+        if max_consec < 10:
             self.warnings.append(
-                f"警告: 有 {incomplete_frames}/{len(frames)} ({incomplete_frames/len(frames)*100:.1f}%) 的幀資料不完整（可能因遮擋）"
+                f"警告: 最高連續有球幀數僅 {max_consec} 幀 (< 10)，球偵測資料過於稀疏，建議跳過此片段"
             )
 
         # 輸出警告訊息
@@ -222,6 +223,31 @@ class DataValidator:
 
         # ball_detections 和 player_detections 可以是空列表
         return True
+
+    @staticmethod
+    def max_consecutive_ball_frames(frames: list) -> int:
+        """
+        計算整個片段中最長的連續有球幀數。
+
+        用於取代舊版「追蹤中斷 > 50% 則跳過」規則：
+        只要最高連續有球幀數 < 10，才視為資料不足並跳過。
+
+        Args:
+            frames: 幀資料列表（每個元素含 'ball_detections' 鍵）
+
+        Returns:
+            最高連續有球幀數
+        """
+        max_c = 0
+        current = 0
+        for fr in frames:
+            if fr and fr.get('ball_detections'):
+                current += 1
+                if current > max_c:
+                    max_c = current
+            else:
+                current = 0
+        return max_c
 
 
 def safe_load_json(json_path: str) -> Tuple[Optional[Dict], Optional[str]]:

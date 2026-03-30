@@ -463,6 +463,8 @@ class ServeDetector:
                 self.event_candidate['apex_frame'] = frame_id
                 self.event_candidate['apex_position'] = prev_ball_pos.copy()
                 self.event_candidate['lost_frames_count'] = 0
+                self.event_candidate['toss_height_px'] = float(toss_height)
+                self.event_candidate['min_toss_height_px'] = float(self.min_toss_height)
         
         elif self.state == ServeState.AWAITING_HIT:
             # 等待擊球
@@ -496,7 +498,9 @@ class ServeDetector:
                         'apex_position': self.event_candidate.get('apex_position', []).tolist()
                             if hasattr(self.event_candidate.get('apex_position', []), 'tolist')
                             else self.event_candidate.get('apex_position'),
-                        'dynamic_threshold_used': hit_v_thresh if use_dynamic_threshold else None
+                        'dynamic_threshold_used': hit_v_thresh if use_dynamic_threshold else None,
+                        'toss_height_px': self.event_candidate.get('toss_height_px'),
+                        'min_toss_height_px': self.event_candidate.get('min_toss_height_px'),
                     }
                     
                     self.detected_events.append(event)

@@ -40,6 +40,12 @@ NUM_KEYPOINTS = 6
 # Keypoint names for display
 KP_NAMES = ['far_left', 'far_right', 'near_left', 'near_right', 'net_left', 'net_right']
 
+# Quality thresholds
+MIN_KP_CONFIDENCE = 0.3        # 單個關鍵點最低可接受信心度
+MIN_OVERALL_CONFIDENCE = 0.5   # 整體偵測最低可接受信心度
+NET_RATIO_MIN = 0.20           # net_y 在遠端～近端範圍內的最低合理比例
+NET_RATIO_MAX = 0.80           # net_y 在遠端～近端範圍內的最高合理比例
+
 
 class AutoCourtDetector:
     """
@@ -237,11 +243,57 @@ class AutoCourtDetector:
             keypoints, fw, fh, margin_lr, margin_far, margin_near
         )
 
+        # --- 品質驗證 ---
+        quality_flags = []
+        per_kp_conf = detection.get('per_kp_confidence')
+        overall_conf = detection.get('confidence', 1.0)
+
+        # 1. 整體信心度過低
+        if overall_conf < MIN_OVERALL_CONFIDENCE:
+            quality_flags.append(
+                f'overall_conf_low ({overall_conf:.2f} < {MIN_OVERALL_CONFIDENCE})'
+            )
+
+        # 2. 逐關鍵點信心度檢查
+        if per_kp_conf is not None:
+            low_kps = [
+                KP_NAMES[i] for i, c in enumerate(per_kp_conf)
+                if i < NUM_KEYPOINTS and c < MIN_KP_CONFIDENCE
+            ]
+            if low_kps:
+                quality_flags.append(f'low_conf_keypoints: {", ".join(low_kps)}')
+
+        # 3. 透視比例驗證：net_y 應落在遠端和近端之間的合理範圍內
+        far_y = float((keypoints[KP_FAR_LEFT][1] + keypoints[KP_FAR_RIGHT][1]) / 2)
+        near_y = float((keypoints[KP_NEAR_LEFT][1] + keypoints[KP_NEAR_RIGHT][1]) / 2)
+        if near_y > far_y:  # 正常透視下近端 Y > 遠端 Y
+            net_ratio = (net_y - far_y) / (near_y - far_y)
+            if not (NET_RATIO_MIN <= net_ratio <= NET_RATIO_MAX):
+                quality_flags.append(
+                    f'net_perspective_invalid (ratio={net_ratio:.2f}, '
+                    f'expected [{NET_RATIO_MIN}, {NET_RATIO_MAX}])'
+                )
+        else:
+            quality_flags.append('court_orientation_invalid (near_y <= far_y)')
+
+        # 決定品質等級
+        if len(quality_flags) == 0:
+            court_detection_quality = 'good'
+        elif overall_conf < MIN_OVERALL_CONFIDENCE or (
+            per_kp_conf is not None and
+            sum(1 for c in per_kp_conf[:NUM_KEYPOINTS] if c < MIN_KP_CONFIDENCE) >= 3
+        ) or 'court_orientation_invalid' in ' '.join(quality_flags):
+            court_detection_quality = 'unreliable'
+        else:
+            court_detection_quality = 'degraded'
+
         config = {
             'court_boundary_polygon': court_boundary,
             'exclusion_zones': exclusion_zones,
             'net_y': net_y,
             'background_ball_zones': [],
+            'court_detection_quality': court_detection_quality,
+            'court_detection_flags': quality_flags,
         }
 
         return config

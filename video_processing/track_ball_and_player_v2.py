@@ -576,7 +576,9 @@ def run_tracking_v2(
     player_model_name: str = None,
     player_iou: float = 0.6,
     imgsz: int = None,
-    verbose: bool = True
+    verbose: bool = True,
+    early_stop_after_serve: bool = True,
+    early_stop_buffer_frames: int = 150,
 ) -> str:
     """
     執行改進版追蹤
@@ -733,12 +735,30 @@ def run_tracking_v2(
         print(f"[追蹤] Detection interval: every {detection_interval} frame(s)")
         print(f"[追蹤] Inference imgsz: {_imgsz}")
     
+    # --- Early Stop：初始化發球狀態機（偵測到擊球後再處理 buffer_frames 幀即停止）---
+    _serve_detector_es = None
+    _es_hit_found = False
+    _es_countdown = -1
+    _es_prev_ball = None
+    if early_stop_after_serve:
+        try:
+            from core.serve_detector import ServeDetector
+            _es_cfg = {'image_height': video_height}
+            if net_y is not None:
+                _es_cfg['net_y'] = net_y
+            _serve_detector_es = ServeDetector(_es_cfg)
+            if verbose:
+                print(f"[早停] 已啟用，偵測到擊球後再處理 {early_stop_buffer_frames} 幀即停止")
+        except Exception as _e:
+            if verbose:
+                print(f"[早停] 無法初始化 ServeDetector，停用早停: {_e}")
+
     # --- 幀處理迴圈 ---
     all_frames_data = []
     frame_idx = 0
     last_ball_detection = None
     last_player_detections = []
-    
+
     start_time = time.time()
     
     while True:
@@ -956,7 +976,38 @@ def run_tracking_v2(
         
         all_frames_data.append(frame_data)
         frame_idx += 1
-        
+
+        # --- Early Stop：嘗試偵測擊球事件，命中後倒數 buffer_frames 幀停止 ---
+        if _serve_detector_es is not None and should_detect:
+            _es_curr_ball = None
+            if tracking_result and tracking_result.get('position') is not None:
+                _es_curr_ball = np.array(tracking_result['position'])
+            elif best_ball is not None:
+                cp = best_ball.get('center_point')
+                if cp:
+                    _es_curr_ball = np.array(cp)
+
+            if not _es_hit_found:
+                _es_event = _serve_detector_es.process_frame(
+                    _es_prev_ball, _es_curr_ball, frame_idx,
+                    player_detections=player_detections
+                )
+                if _es_event:
+                    _es_hit_found = True
+                    _es_countdown = early_stop_buffer_frames
+                    if verbose:
+                        print(f"[早停] 幀 {frame_idx} 偵測到擊球，"
+                              f"再處理 {early_stop_buffer_frames} 幀後停止追蹤")
+            _es_prev_ball = _es_curr_ball
+
+        if _es_hit_found:
+            if _es_countdown <= 0:
+                if verbose:
+                    print(f"[早停] 觸發於幀 {frame_idx}，"
+                          f"跳過剩餘 {total_frames - frame_idx} 幀")
+                break
+            _es_countdown -= 1
+
         # 進度顯示
         if verbose and frame_idx % 100 == 0:
             elapsed = time.time() - start_time

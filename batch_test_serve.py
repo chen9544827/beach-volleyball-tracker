@@ -34,6 +34,9 @@ import logging
 # 設定日誌
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 
+# 跳過條件：整個片段中最高連續有球幀數低於此值則跳過
+MIN_CONSECUTIVE_BALL_FRAMES = 10
+
 
 def load_tracking_data(json_path: str) -> dict:
     """
@@ -300,7 +303,13 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         'is_ace': False,
         'landing_zone': None,
         'landing_position': None,
+        'max_consecutive_ball_frames': 0,
+        'court_detection_quality': None,
     }
+
+    # 記錄場地偵測品質（來自 auto_court_detector 的 court_config 元資料）
+    if court_config and court_config.get('court_detection_quality'):
+        result['court_detection_quality'] = court_config['court_detection_quality']
 
     try:
         # 載入追蹤數據（包含驗證）
@@ -315,6 +324,18 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         # 計算球偵測率
         frames_with_ball = sum(1 for fr in frames_data if fr.get('ball_detections'))
         result['ball_detection_rate'] = frames_with_ball / len(frames_data) if frames_data else 0
+
+        # 新版跳過條件：最高連續有球幀數 < 10 才跳過
+        # （取代舊版「追蹤中斷 > 50% 則跳過」規則）
+        max_consec = DataValidator.max_consecutive_ball_frames(frames_data)
+        result['max_consecutive_ball_frames'] = max_consec
+        if max_consec < MIN_CONSECUTIVE_BALL_FRAMES:
+            result['status'] = 'insufficient_ball_data'
+            result['error'] = (
+                f'最高連續有球幀數僅 {max_consec} 幀，'
+                f'低於門檻 {MIN_CONSECUTIVE_BALL_FRAMES}，跳過此片段'
+            )
+            return result
 
     except ValidationError as e:
         result['status'] = 'error'
@@ -367,6 +388,8 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         result['found_frame'] = server_result.get('found_frame_id')
         result['frames_searched'] = server_result.get('frames_searched', 0)
         result['status'] = 'success'
+        result['toss_height_px'] = serve_event.get('toss_height_px')
+        result['min_toss_height_px'] = serve_event.get('min_toss_height_px')
         
         # 跳發偵測
         jump_result = classify_serve_type(
@@ -621,12 +644,23 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
                 auto_path = os.path.join(court_config_dir, f"{group_key}.json")
                 court_config = load_court_config(auto_path)
                 if court_config:
-                    try:
-                        court_zones = CourtZones(court_config)
-                    except Exception:
-                        court_zones = None
-                    if verbose:
-                        print(f"    [AutoMatch] {group_key}")
+                    # 若自動場地偵測品質不可靠，回退至全域 court_config
+                    cq = court_config.get('court_detection_quality')
+                    if cq == 'unreliable':
+                        flags = court_config.get('court_detection_flags', [])
+                        flag_str = ', '.join(flags) if flags else 'unknown'
+                        print(f"    [WARNING] 自動場地偵測不可靠 ({flag_str})，"
+                              f"回退至預設 court_config")
+                        court_config = global_court_config
+                        court_zones = global_court_zones
+                    else:
+                        try:
+                            court_zones = CourtZones(court_config)
+                        except Exception:
+                            court_zones = None
+                        if verbose:
+                            quality_tag = f' [{cq}]' if cq else ''
+                            print(f"    [AutoMatch] {group_key}{quality_tag}")
 
         result = process_single_video(
             video_path, json_path, output_dir,
@@ -766,6 +800,12 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
                 ball_detection_rate=r.get('ball_detection_rate', 0),
                 status=r.get('status', 'unknown'),
             )
+            # 強制降級：自動場地偵測品質不佳時覆蓋 quality_grade
+            court_quality = r.get('court_detection_quality')
+            if court_quality == 'unreliable':
+                row['quality_grade'] = 'F'
+            elif court_quality == 'degraded' and row.get('quality_grade') in ('A', 'B'):
+                row['quality_grade'] = 'C'
             export_rows.append(row)
 
         csv_path = os.path.join(output_dir, 'batch_results.csv')
