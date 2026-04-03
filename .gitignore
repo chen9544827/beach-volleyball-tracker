@@ -166,6 +166,8 @@ logs/
 
 # 模型權重與結果
 *.pt
+!models/ball_best.pt
+!models/VballNetV1b_seq9_grayscale_best.onnx
 runs/
 weights/
 dataset/
@@ -204,7 +206,8 @@ batch_test_output/
 
 # 暫存測試檔案
 nul
-models/
+# models/ 整個目錄忽略，但以下例外
+# models/
 predict_output/
 court_configs/backup/
 
@@ -215,6 +218,7 @@ vball-net-pytorch/
 
 # 模型與大型二進位檔案
 *.onnx
+!models/VballNetV1b_seq9_grayscale_best.onnx
 *.keras
 *.h5
 *.pb
