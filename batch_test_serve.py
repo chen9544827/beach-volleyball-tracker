@@ -361,7 +361,8 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
             use_dynamic_threshold=True,
             first_only=True,
             log_prefix="" if verbose else None,
-            image_height=image_height
+            image_height=image_height,
+            ball_detection_rate=result.get('ball_detection_rate', 1.0)
         )
         
         if not serve_events:
@@ -375,12 +376,15 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
         result['hit_speed'] = serve_event.get('hit_speed', 0)
 
         # 發球員識別（使用 lookback 方法）
+        det_rate = result.get('ball_detection_rate', 1.0)
+        server_min_conf = 0.25 if det_rate < 0.5 else 0.4
         server_result = analyze_serve_player(
             frames_data=frames_data,
             serve_event=serve_event,
             method='lookback',
             image_height=image_height,
-            exclusion_zones=court_config.get('exclusion_zones') if court_config else None
+            exclusion_zones=court_config.get('exclusion_zones') if court_config else None,
+            min_confidence=server_min_conf
         )
         
         result['server_index'] = server_result.get('final_server_index')
@@ -503,8 +507,8 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
                     if ret:
                         hit_frame_data = get_frame_by_id(frames_data, hit_frame_id)
                         if hit_frame_data:
-                            frame = draw_serve_analysis(
-                                frame, hit_frame_data,
+                            annotated = draw_serve_analysis(
+                                frame.copy(), hit_frame_data,
                                 serve_event.get('hit_position'),
                                 server_result,
                                 f"HIT Frame {hit_frame_id}",
@@ -513,8 +517,17 @@ def process_single_video(video_path: str, json_path: str, output_dir: str,
                                 jump_result=jump_result
                             )
                             output_path = os.path.join(output_dir, f"{video_name}_server_HIT.jpg")
-                            cv2.imwrite(output_path, frame)
-                
+                            cv2.imwrite(output_path, annotated)
+
+                            # 發球瞬間截圖：存至 serve_images/ 子目錄，同時保留乾淨原圖
+                            serve_images_dir = os.path.join(output_dir, "serve_images")
+                            os.makedirs(serve_images_dir, exist_ok=True)
+                            serve_type_tag = jump_result.get('serve_type', 'unknown') if jump_result else 'unknown'
+                            moment_filename = f"{video_name}_serve_moment_f{hit_frame_id}_{serve_type_tag}.jpg"
+                            moment_path = os.path.join(serve_images_dir, moment_filename)
+                            cv2.imwrite(moment_path, annotated)
+                            result['serve_moment_image'] = moment_path
+
                 cap.release()
         
     except Exception as e:
@@ -688,6 +701,9 @@ def batch_test(video_dir: str, json_dir: str, output_dir: str,
                   f"發球員: Player {result['server_index']}, "
                   f"信心度: {result['confidence']:.2f}, "
                   f"{serve_emoji} {serve_type}{sz_info}{reception_info}")
+            moment_img = result.get('serve_moment_image')
+            if moment_img:
+                print(f"    [IMAGE]   發球瞬間圖片: {moment_img}")
         elif result['status'] == 'no_serve':
             print(f"    [WARNING] 未偵測到發球")
         else:

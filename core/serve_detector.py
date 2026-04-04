@@ -57,6 +57,14 @@ class ServeDetector:
         self.hit_v_thresh = self.config.get('hit_v', 40.0)
         self.max_frames_to_hit = self.config.get('max_frames_to_hit', 40)
         self.hit_horizontal_ratio_thresh = self.config.get('hit_h_ratio', 2.5)
+
+        # [早擊偵測] AWAITING_APEX 期間的速度閾值
+        # 發球接觸點有時在拋球頂點前發生，此時 speed_history 可能不足（< 50 筆）
+        # 導致動態閾值 fallback 到靜態 40.0，但擊球後球速常為 25-35px/frame
+        # 此閾值取 min(動態閾值, apex_early_hit_v_thresh)，確保片段早期也能偵測
+        # 設 28.0 @720p：高於拋球速度（8-15）、低於標準擊球（40），配合水平比例濾除噪音
+        resolution_scale_temp = self.config.get('image_height', 720) / 720.0
+        self.apex_early_hit_v_thresh = self.config.get('apex_early_hit_v', 28.0) * resolution_scale_temp
         
         # 物理約束
         self.max_plausible_speed = self.config.get('max_speed', 200.0)
@@ -76,6 +84,9 @@ class ServeDetector:
         # 注意：因攝影機透視角度使場地空間座標判斷不可靠，改用球員相對距離
         self.player_proximity_thresh = self.config.get('player_proximity_thresh', 150.0) * resolution_scale
 
+        # CONFIRMING_TOSS 的 Gap Tolerance（連續失球幀容忍上限，超過才重置）
+        self.confirming_toss_gap_tolerance = self.config.get('confirming_toss_gap_tolerance', 3)
+
         # [Method C] net_y 約束：拋球起點需在 net_y + margin 以上（far side / near net）
         # 真實發球：球在遠端底線附近拋起，Y 值接近或小於 net_y
         # 假陽性：接球後球從近端（大 Y）反彈上升，Y 遠大於 net_y
@@ -84,7 +95,15 @@ class ServeDetector:
         #       比舊版 120px 多 10px，防止真實發球球第一次偵測點恰好在邊界附近被誤拒
         self.net_y = self.config.get('net_y', None)  # None = 不啟用此約束
         self.net_y_toss_margin = self.config.get('net_y_toss_margin', 130.0) * resolution_scale
-        
+
+        # 動態寬鬆模式：低球偵測率時降低拋球高度閾值
+        ball_detection_rate = self.config.get('ball_detection_rate', 1.0)
+        if ball_detection_rate < 0.5:
+            self.min_toss_height *= 0.7
+            self._relaxed_mode = True
+        else:
+            self._relaxed_mode = False
+
         # 狀態
         self.state = ServeState.SEARCHING_TOSS
         self.event_candidate = {}
@@ -331,9 +350,14 @@ class ServeDetector:
                 elif self.state == ServeState.AWAITING_HIT and \
                      self.event_candidate.get('lost_frames_count', 0) > 15:
                     self.state = ServeState.SEARCHING_TOSS
-                elif self.state == ServeState.CONFIRMING_TOSS and \
-                     self.event_candidate.get('lost_frames_count', 0) > 5:
-                    self.state = ServeState.SEARCHING_TOSS
+                elif self.state == ServeState.CONFIRMING_TOSS:
+                    lost = self.event_candidate.get('lost_frames_count', 0)
+                    if lost > self.confirming_toss_gap_tolerance:
+                        self.state = ServeState.SEARCHING_TOSS
+                    else:
+                        # 凍結 timeout：延伸 confirm_start_frame 以排除失球幀
+                        self.event_candidate['confirm_start_frame'] = \
+                            self.event_candidate.get('confirm_start_frame', frame_id) + 1
             return None
         
         # 計算速度
@@ -446,6 +470,44 @@ class ServeDetector:
                 self.state = ServeState.SEARCHING_TOSS
                 return None
 
+            # [早擊偵測] 發球接觸有時在球未達頂點前就發生（或發生於偵測空白期後球重新出現時）
+            # 若在 AWAITING_APEX 期間觀察到高速 + 軌跡合理 + 已上升足夠高度，視為有效擊球
+            # 觸發條件：speed > apex_early_hit_thresh + validate_hit 通過 + 已上升 >= min_toss_height * 0.5
+            # 使用 min(動態閾值, apex_early_hit_v_thresh=28px) 確保片段早期 speed_history 不足時也能偵測
+            apex_early_hit_thresh = min(hit_v_thresh, self.apex_early_hit_v_thresh)
+            if speed > apex_early_hit_thresh:
+                is_valid, reason = self.validate_hit(speed, vx, vy)
+                if is_valid:
+                    toss_start_y = self.event_candidate.get('toss_position', curr_ball_pos)[1]
+                    current_rise = toss_start_y - curr_ball_pos[1]
+                    if current_rise >= self.min_toss_height * 0.5:
+                        est_frame, est_pos, orig_frame = self._estimate_contact_frame(
+                            frame_id, curr_ball_pos, hit_v_thresh
+                        )
+                        est_pos_list = est_pos.tolist() if hasattr(est_pos, 'tolist') else list(est_pos)
+                        event = {
+                            'hit_frame_id': est_frame,
+                            'hit_frame_id_detected': orig_frame,
+                            'hit_position': est_pos_list,
+                            'hit_speed': float(speed),
+                            'hit_velocity': [float(vx), float(vy)],
+                            'toss_start_frame': self.event_candidate.get('toss_start_frame'),
+                            'toss_position': self.event_candidate.get('toss_position', []).tolist()
+                                if hasattr(self.event_candidate.get('toss_position', []), 'tolist')
+                                else self.event_candidate.get('toss_position'),
+                            'apex_frame': frame_id,
+                            'apex_position': curr_ball_pos.tolist() if hasattr(curr_ball_pos, 'tolist') else list(curr_ball_pos),
+                            'dynamic_threshold_used': hit_v_thresh if use_dynamic_threshold else None,
+                            'toss_height_px': float(current_rise),
+                            'min_toss_height_px': float(self.min_toss_height),
+                            'hit_during_apex': True,
+                        }
+                        self.detected_events.append(event)
+                        self.state = ServeState.COOLDOWN
+                        self.cooldown_frames = 0
+                        self.event_candidate = {}
+                        return event
+
             # vy > 0 表示向下（像素座標系）
             if vy > 1:  # 開始下降
                 # 檢查拋球高度是否足夠（過濾 rally 球短暫向上的 false positive）
@@ -533,7 +595,8 @@ def analyze_serve_events_v2(
     log_prefix: str = "",
     use_dynamic_threshold: bool = True,
     first_only: bool = True,
-    image_height: int = 720
+    image_height: int = 720,
+    ball_detection_rate: float = 1.0
 ) -> List[Dict[str, Any]]:
     """
     改進版發球事件分析（可直接替換原有的 analyze_serve_events）
@@ -550,10 +613,13 @@ def analyze_serve_events_v2(
     """
     cfg = dict(config or {})
     cfg.setdefault('image_height', image_height)
+    cfg['ball_detection_rate'] = ball_detection_rate
     detector = ServeDetector(cfg)
-    
+
     mode_str = "（只取第一個事件）" if first_only else "（取所有事件）"
     print(f"\n{log_prefix}[分析階段] 使用改進版 v2 偵測邏輯 {mode_str}...")
+    if ball_detection_rate < 0.5:
+        print(f"{log_prefix}  [寬鬆模式] 球偵測率 {ball_detection_rate:.1%} < 50%，min_toss_height x 0.7")
     
     def get_ball_center(frame_data):
         """從幀數據中提取球中心"""

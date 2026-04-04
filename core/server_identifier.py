@@ -699,7 +699,8 @@ def analyze_serve_player(
     serve_event: Dict,
     method: str = 'lookback',
     image_height: int = 720,
-    exclusion_zones: List = None
+    exclusion_zones: List = None,
+    min_confidence: float = 0.4
 ) -> Dict[str, Any]:
     """
     分析發球事件，找出發球員
@@ -735,7 +736,7 @@ def analyze_serve_player(
     }
     
     # 收集所有方法的結果，最後選信心度最高的
-    MIN_CONFIDENCE = 0.4  # 低於此值視為不可靠，繼續嘗試其他方法
+    MIN_CONFIDENCE = min_confidence  # 低於此值視為不可靠，繼續嘗試其他方法
     candidates = []  # (confidence, result_dict)
 
     # 方法 1：Lookback（推薦）- 從拋球幀往回找
