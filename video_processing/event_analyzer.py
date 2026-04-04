@@ -1,146 +1,150 @@
-# video_processing/event_analyzer.py
+# video_processing/track_ball_and_player.py (v15 最終正確版 - 根據您的原始碼修正)
+
+# -*- coding: utf-8 -*-
+import os
+import sys
+import json
+import argparse
+import traceback
 import numpy as np
-import cv2
+from ultralytics import YOLO
 
-# --- 姿態關鍵點索引 ---
-LEFT_WRIST, RIGHT_WRIST = 9, 10
-LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
+# --- 關鍵修正：定義正確的模型路徑與檔名 ---
+# 獲取此腳本檔案所在的目錄 (e.g., .../video_processing)
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+# 獲取專案的根目錄 (e.g., .../beach-volleyball-tracker)
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+# 構造 'models' 資料夾的絕對路徑
+MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 
-def is_player_behind_baseline(player_center, court_polygon):
-    if court_polygon is None or len(court_polygon) < 4: return True 
-    point = (float(player_center[0]), float(player_center[1]))
-    if cv2.pointPolygonTest(np.array(court_polygon, dtype=np.int32), point, False) >= 0: return False
-    return True
+# 根據您提供的正確檔名
+PLAYER_MODEL_NAME = 'yolov8s-pose.pt'
+BALL_MODEL_NAME = 'ball_best.pt'
 
-def find_serve_by_pose_and_toss(all_frames_data, config, court_polygon):
+# --- 保留您原始的偵測邏輯，不做任何修改 ---
+def detect_ball(frame, ball_model, conf_thresh, background_ball_zones):
+    # (此函數與您提供的版本完全相同)
+    import cv2
+    detected_balls = []
+    try:
+        results = ball_model(frame, conf=conf_thresh, classes=[0], verbose=False)
+        if not results or not results[0].boxes: return detected_balls
+        for box in results[0].boxes:
+            if box.xyxy is None or len(box.xyxy) == 0: continue
+            coords = box.xyxy[0].cpu().numpy()
+            if len(coords) < 4: continue
+            x1, y1, x2, y2 = map(int, coords)
+            center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+            is_in_background_zone = False
+            if background_ball_zones:
+                for zone in background_ball_zones:
+                    if zone.get('x1') is not None and zone['x1'] <= center_x <= zone['x2'] and zone['y1'] <= center_y <= zone['y2']:
+                        is_in_background_zone = True; break
+            detected_balls.append({
+                "box_coords": [x1, y1, x2, y2], "confidence": float(box.conf[0].cpu().numpy()),
+                "center_point": [center_x, center_y], "is_in_background_zone": is_in_background_zone
+            })
+    except Exception as e: print(f"!! Exception in detect_ball: {e}", file=sys.stderr)
+    return detected_balls
+
+def detect_and_filter_players(frame, player_pose_model, conf_thresh, court_boundary_np, exclusion_zones_np, court_center_xy):
+    # (此函數與您提供的版本完全相同)
+    import cv2
+    all_candidates = []
+    try:
+        results = player_pose_model(frame, conf=conf_thresh, classes=[0], verbose=False)
+        if not results or not results[0].boxes or not results[0].keypoints: return all_candidates
+        for i in range(len(results[0].boxes)):
+            box, kpts = results[0].boxes[i], results[0].keypoints[i]
+            x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+            center_pt = (float((x1+x2)/2), float((y1+y2)/2))
+            in_exclusion = False
+            if exclusion_zones_np:
+                for zone_np in exclusion_zones_np:
+                    if cv2.pointPolygonTest(zone_np, center_pt, False) >= 0: in_exclusion = True; break
+            if in_exclusion: continue
+            is_inside = cv2.pointPolygonTest(court_boundary_np, center_pt, False) >= 0 if court_boundary_np is not None else False
+            dist_to_center = np.linalg.norm(np.array(center_pt) - np.array(court_center_xy)) if court_center_xy else float('inf')
+            keypoints_xyc_list = []
+            if kpts.xy is not None and kpts.conf is not None:
+                kpts_xy, kpts_conf = kpts.xy[0].cpu().numpy(), kpts.conf[0].cpu().numpy()
+                for kp_idx in range(kpts_xy.shape[0]): keypoints_xyc_list.append([float(kpts_xy[kp_idx, 0]), float(kpts_xy[kp_idx, 1]), float(kpts_conf[kp_idx])])
+            all_candidates.append({
+                "box_coords": [x1, y1, x2, y2], "confidence": float(box.conf[0].cpu().numpy()),
+                "center_point": list(center_pt), "is_inside_court": bool(is_inside),
+                "distance_to_center": float(dist_to_center), "pose_keypoints": keypoints_xyc_list
+            })
+    except Exception as e: print(f"!! Exception in detect_and_filter_players: {e}", file=sys.stderr)
+    all_candidates.sort(key=lambda p: (not p['is_inside_court'], p['distance_to_center']))
+    return all_candidates[:4]
+
+# --- 【v15 簡化與修正】---
+# 移除所有繪圖和不必要的存檔邏輯
+# 將原本的 main() 函數改造成一個簡單、專注於產生JSON的單一入口函數
+
+def run_tracking_and_save_json(video_path, output_dir):
     """
-    [最終交付版]
-    在「驗證拋球」階段加入了容錯機制，以應對因動態模糊導致的短暫目標丟失。
+    專門被 run_first_hit_analysis.py 呼叫的單一入口函數。
+    它的唯一目標就是處理影片並產生一個 JSON 檔案。
     """
-    # --- 參數設定 ---
-    wrist_dist_thresh = config.get("wrist_dist_thresh", 50)
-    min_pose_held_frames = config.get("min_pose_held_frames", 3)
-    toss_upward_vel_thresh = config.get("toss_upward_vel_thresh", 5) 
-    max_horizontal_ratio = config.get("max_horizontal_ratio", 1.5) 
-    min_toss_validation_frames = config.get("min_toss_validation_frames", 4)
-    min_toss_validation_height = config.get("min_toss_validation_height", 30)
-    hit_dist_thresh = config.get("hit_dist_thresh", 80)
-    max_lost_frames_tolerance = config.get("max_lost_frames", 15)
-    reacquisition_radius = config.get("reacquisition_radius", 150)
-    # ✨ 新增：驗證拋球階段的專用容錯參數 ✨
-    max_validation_lost_frames = config.get("max_validation_lost_frames", 5) 
-
-    # --- 狀態機 ---
-    state = "SEARCHING"
-    pose_confirmation_frame = -1
-    toss_data = {}
-
-    print("\n[智慧推理邏輯-最終交付版] 正在搜尋發球動作序列...")
+    import cv2 # 延遲導入
     
-    for i in range(1, len(all_frames_data)):
-        prev_frame_data = all_frames_data[i-1]
-        curr_frame_data = all_frames_data[i]
-        
-        players = curr_frame_data.get('player_detections', [])
-        balls = curr_frame_data.get('ball_detections', [])
-        
-        if state == "SEARCHING":
-            if not players or balls: continue
-            for player in players:
-                if not is_player_behind_baseline(player['center_point'], court_polygon): continue
-                kpts = player.get("pose_keypoints")
-                if not kpts or len(kpts) < 17: continue
-                l_wrist, r_wrist, l_shoulder_y = np.array(kpts[LEFT_WRIST][:2]), np.array(kpts[RIGHT_WRIST][:2]), kpts[LEFT_SHOULDER][1]
-                if kpts[LEFT_WRIST][2] > 0.4 and kpts[RIGHT_WRIST][2] > 0.4:
-                    wrist_dist = np.linalg.norm(l_wrist - r_wrist)
-                    if wrist_dist < wrist_dist_thresh and l_wrist[1] > (l_shoulder_y + 10):
-                        print(f"  > [第 {i} 幀][偵測到發球區姿勢] -> 進入 確認姿勢 狀態")
-                        state = "CONFIRMING_POSE"; pose_confirmation_frame = i
-                        toss_data = {'server_id': player['center_point'], 'server_info': player}
-                        break
-        
-        elif state == "CONFIRMING_POSE":
-            if (i - pose_confirmation_frame) >= min_pose_held_frames:
-                print(f"  > [第 {i} 幀][確認姿勢成功] -> 進入 耐心等待拋球 狀態")
-                state = "WAITING_FOR_TOSS"
-            elif not players: print(f"  > [第 {i} 幀][重設] 確認期間球員消失"); state = "SEARCHING"
-        
-        elif state == "WAITING_FOR_TOSS":
-            if balls:
-                curr_ball = max(balls, key=lambda b: b['confidence']); curr_ball_pos = np.array(curr_ball['center_point'])
-                server_pos = np.array(toss_data['server_id'])
-                if np.linalg.norm(curr_ball_pos - server_pos) < reacquisition_radius:
-                    ball_vy, ball_vx = 0, 0
-                    if prev_frame_data.get('ball_detections'):
-                        prev_ball_pos = min([b['center_point'] for b in prev_frame_data['ball_detections']], key=lambda p: np.linalg.norm(np.array(p) - curr_ball_pos), default=curr_ball_pos)
-                        ball_vy = prev_ball_pos[1] - curr_ball_pos[1]; ball_vx = curr_ball_pos[0] - prev_ball_pos[0]
-                    if ball_vy > toss_upward_vel_thresh:
-                        if abs(ball_vx) > ball_vy * max_horizontal_ratio:
-                            print(f"  > [第 {i} 幀][忽略] 偵測到水平移動 (vx: {ball_vx:.1f}, vy: {ball_vy:.1f})")
-                            continue
-                        print(f"  > [第 {i} 幀][偵測到垂直拋球] (vy: {ball_vy:.1f}) -> 進入 驗證軌跡 狀態")
-                        state = "VALIDATING_TOSS"; toss_data['validation_start_frame'] = i
-                        toss_data['validation_lost_frames'] = 0 # 初始化驗證容錯計數器
-            if (i - pose_confirmation_frame) > 150: print(f"  > [第 {i} 幀][重設] 等待拋球超時"); state = "SEARCHING"
+    # 步驟 1: 載入模型 (使用修正後的絕對路徑)
+    player_model_path = os.path.join(MODELS_DIR, PLAYER_MODEL_NAME)
+    ball_model_path = os.path.join(MODELS_DIR, BALL_MODEL_NAME)
+    
+    if not os.path.exists(player_model_path): raise FileNotFoundError(f"找不到選手模型: {player_model_path}")
+    if not os.path.exists(ball_model_path): raise FileNotFoundError(f"找不到排球模型: {ball_model_path}")
 
-        elif state == "VALIDATING_TOSS":
-            # ✨ 核心修正：在驗證期間，對球的消失進行容錯 ✨
-            if not balls:
-                toss_data['validation_lost_frames'] += 1
-                print(f"  > [第 {i} 幀][驗證中] 暫時失去球... ({toss_data['validation_lost_frames']}/{max_validation_lost_frames})")
-                if toss_data['validation_lost_frames'] > max_validation_lost_frames:
-                    print(f"    ---> [重設] 驗證期間球失蹤太久，返回等待"); state = "WAITING_FOR_TOSS"
-                continue
-            
-            toss_data['validation_lost_frames'] = 0 # 球出現了，重設計數器
-            curr_ball = max(balls, key=lambda b: b['confidence']); curr_ball_pos = np.array(curr_ball['center_point']); ball_vy = 0
-            if prev_frame_data.get('ball_detections'):
-                prev_ball_pos = min([b['center_point'] for b in prev_frame_data['ball_detections']], key=lambda p: np.linalg.norm(np.array(p) - curr_ball_pos), default=curr_ball_pos)
-                ball_vy = prev_ball_pos[1] - curr_ball_pos[1]
-            if ball_vy < -1: print(f"  > [第 {i} 幀][重設] 拋球軌跡不持續"); state = "WAITING_FOR_TOSS"; continue
-            frames_since_validation = i - toss_data['validation_start_frame']
-            if frames_since_validation >= min_toss_validation_frames:
-                print(f"  > [第 {i} 幀][確認拋球] 軌跡驗證成功！-> 進入 等待頂點 狀態")
-                state = "AWAITING_APEX"; toss_data['frames_lost_counter'] = 0
+    player_model = YOLO(player_model_path)
+    ball_model = YOLO(ball_model_path)
+    
+    # 步驟 2: 載入影片
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened(): raise IOError(f"無法開啟影片檔案: {video_path}")
+    
+    # 步驟 3: 幀處理迴圈 (使用您原始的偵測邏輯)
+    all_frames_data = []
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
+        
+        # 為了簡化，我們暫時不使用 court_config.json 的過濾功能
+        # 如果需要，可以將其作為參數傳遞進來
+        balls = detect_ball(frame, ball_model, 0.3, [])
+        players = detect_and_filter_players(frame, player_model, 0.3, None, [], None)
+        
+        all_frames_data.append({"frame_id": frame_idx, "ball_detections": balls, "player_detections": players})
+        frame_idx += 1
+    
+    cap.release()
+    
+    # 步驟 4: 正確地儲存 JSON 檔案
+    video_base_name = os.path.splitext(os.path.basename(video_path))[0]
+    # 確保輸出目錄存在 (主腳本會提供完整的路徑)
+    os.makedirs(output_dir, exist_ok=True)
+    json_output_path = os.path.join(output_dir, f"{video_base_name}_all_frames_data_with_pose.json")
 
-        elif state == "AWAITING_APEX":
-            # ... (此部分邏輯不變) ...
-            if not balls:
-                toss_data['frames_lost_counter'] = getattr(toss_data, 'frames_lost_counter', 0) + 1
-                if toss_data['frames_lost_counter'] > max_lost_frames_tolerance: print(f"    ---> [重設] 等待頂點期間球失蹤太久"); state = "SEARCHING"
-                continue
-            toss_data['frames_lost_counter'] = 0; ball_vy = 0
-            if prev_frame_data.get('ball_detections'):
-                curr_ball = max(balls, key=lambda b: b['confidence'])
-                prev_ball_pos = min([b['center_point'] for b in prev_frame_data['ball_detections']], key=lambda p: np.linalg.norm(np.array(p) - np.array(curr_ball['center_point'])), default=curr_ball['center_point'])
-                ball_vy = np.array(curr_ball['center_point'])[1] - np.array(prev_ball_pos)[1]
-            if ball_vy > 1:
-                print(f"  > [第 {i} 幀][到達頂點] 球已開始下落，進入 等待擊球 狀態。"); state = "AWAITING_HIT"
-            elif (i - toss_data.get('validation_start_frame', i)) > 60: print(f"  > [第 {i} 幀][重設] 等待頂點超時"); state = "SEARCHING"
+    with open(json_output_path, 'w', encoding='utf-8') as f:
+        json.dump(all_frames_data, f, indent=2)
+    
+    print(f"JSON saved to {json_output_path}", file=sys.stdout)
 
-        elif state == "AWAITING_HIT":
-            # ... (此部分邏輯不變) ...
-            if not balls:
-                toss_data['frames_lost_counter'] = getattr(toss_data, 'frames_lost_counter', 0) + 1
-                if toss_data['frames_lost_counter'] > max_lost_frames_tolerance: print(f"    ---> [重設] 等待擊球期間球失蹤太久"); state = "SEARCHING"
-                continue
-            toss_data['frames_lost_counter'] = 0; current_server_data = None
-            original_server_id = toss_data.get('server_id')
-            if original_server_id and players:
-                candidates = [(p, np.linalg.norm(np.array(p['center_point']) - np.array(original_server_id))) for p in players]
-                valid_candidates = [cand for cand in candidates if cand[1] < reacquisition_radius]
-                if valid_candidates: current_server_data, _ = min(valid_candidates, key=lambda item: item[1])
-            if current_server_data:
-                toss_data['server_id'] = current_server_data['center_point']
-                curr_ball = max(balls, key=lambda b: b['confidence']); curr_ball_pos = np.array(curr_ball['center_point'])
-                dist_to_server = np.linalg.norm(np.array(current_server_data['center_point']) - curr_ball_pos)
-                print(f"  [第 {i} 幀][等待擊球] 追蹤中... [距離: {dist_to_server:.1f} (需 < {hit_dist_thresh})]")
-                if dist_to_server < hit_dist_thresh:
-                    print(f"  [成功!] 條件滿足，偵測到擊球！")
-                    return [{"frame_id": i, "event_type": "SERVE", "server_player_data": current_server_data, "ball_position": list(curr_ball_pos)}]
-            else:
-                toss_data['frames_lost_counter'] = getattr(toss_data, 'frames_lost_counter', 0) + 1
-                if toss_data['frames_lost_counter'] > max_lost_frames_tolerance: print(f"    ---> [重設] 目標(球員)失蹤太久"); state = "SEARCHING"
-            if (i - pose_confirmation_frame) > 240: print(f"  > [第 {i} 幀][重設] 整個序列等待超時"); state = "SEARCHING"
-                
-    return []
+
+# --- 【v15 簡化與修正】---
+# 將原本複雜的 main() 函數替換成現在這個更簡單的版本
+# 它只負責解析從主腳本傳來的參數，並呼叫上面的核心函數
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, required=True)
+    args = parser.parse_args()
+
+    try:
+        run_tracking_and_save_json(args.input, args.output_dir)
+    except Exception as e:
+        # 將任何錯誤都打印到標準錯誤流，以便主腳本捕捉
+        print(f"FATAL ERROR in track_ball_and_player.py: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1) # 以非零代碼退出，明確表示失敗

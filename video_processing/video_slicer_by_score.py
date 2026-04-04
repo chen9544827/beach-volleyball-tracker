@@ -1,208 +1,267 @@
-# video_slicer_by_score_comparison.py (或您的新檔名)
+# video_processing/video_slicer_by_score.py (v5 - 支援 ROI 配置檔案)
 import cv2
 import os
 import argparse
 import numpy as np
+import csv
+import json
 
 # --- 設定 ---
-SCORE_ROI_TEAM1 = (280, 29, 59, 51)  # 範例值
-SCORE_ROI_TEAM2 = (287, 92, 59, 50)  # 範例值
+# 預設 ROI 座標（若未指定配置檔案則使用此值）
+SCORE_ROI_TEAM1 = (280, 29, 59, 51)  # 隊伍1 (例如:上方/左方) 的分數區域 (x, y, w, h)
+SCORE_ROI_TEAM2 = (287, 92, 59, 50)  # 隊伍2 (例如:下方/右方) 的分數區域 (x, y, w, h)
+
+
+def load_roi_config(config_path):
+    """載入 ROI 配置檔案
+
+    Args:
+        config_path: ROI 配置 JSON 檔案路徑
+
+    Returns:
+        tuple: (team1_roi, team2_roi) 若成功，否則 None
+    """
+    if not config_path or not os.path.exists(config_path):
+        if config_path:
+            print(f"[WARNING] ROI 配置檔案不存在: {config_path}")
+        print(f"[INFO] 使用預設 ROI 座標")
+        return None
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        # 驗證必要欄位
+        if 'score_roi_team1' not in config or 'score_roi_team2' not in config:
+            print(f"[ERROR] ROI 配置格式錯誤: 缺少必要欄位")
+            return None
+
+        # 轉換為 tuple 格式 (x, y, w, h)
+        roi1 = config['score_roi_team1']
+        roi2 = config['score_roi_team2']
+
+        team1_roi = (roi1['x'], roi1['y'], roi1['width'], roi1['height'])
+        team2_roi = (roi2['x'], roi2['y'], roi2['width'], roi2['height'])
+
+        print(f"[OK] 已載入 ROI 配置: {config_path}")
+        print(f"     Team1 ROI: {team1_roi}")
+        print(f"     Team2 ROI: {team2_roi}")
+
+        return team1_roi, team2_roi
+
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] JSON 格式錯誤: {e}")
+        return None
+    except KeyError as e:
+        print(f"[ERROR] 配置欄位錯誤: 缺少 {e}")
+        return None
+    except Exception as e:
+        print(f"[ERROR] 載入 ROI 配置失敗: {e}")
+        return None
+
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="根據兩個獨立分數ROI的影像變化來分割影片。")
+    parser = argparse.ArgumentParser(description="根據兩個獨立分數ROI的影像變化來分割影片，並判斷得分方。")
     parser.add_argument("--input", type=str, required=True, help="輸入的長時間影片檔案路徑")
-    parser.add_argument("--output_dir", type=str, default="../output_data/video_segments_output_comp_split_v2", help="儲存分割後影片片段的根目錄")
+    parser.add_argument("--output_dir", type=str, default="output_data/video_segments_with_score", help="儲存分割後影片片段與報告的根目錄")
+    parser.add_argument("--roi_config", type=str, default=None,
+                        help="ROI 配置 JSON 檔案路徑（若不指定則使用預設值）")
     parser.add_argument("--min_segment_duration", type=int, default=10, help="有效比賽片段的最小持續時間 (秒)")
     parser.add_argument("--long_segment_threshold", type=int, default=90, help="長片段的閾值 (秒)")
     parser.add_argument("--roi_check_interval", type=float, default=0.5, help="每隔多少秒檢查一次ROI變化 (秒)")
-    # 移除了 --no_change_timeout 參數，因為現在的邏輯是基於變化來分割
-    parser.add_argument("--diff_threshold", type=int, default=600, 
-                        help="單個ROI影像差異閾值 (SAD)。需要調校！")
+    parser.add_argument("--diff_threshold", type=int, default=9000,
+                        help="單個ROI影像差異閾值 (SAD)。這是觸發分數變化的最低門檻，建議使用測試工具來決定此數值。")
     return parser.parse_args()
 
-def finalize_segment_processing(temp_filename, segment_frames_written, fps, min_duration_sec, long_threshold_sec,
-                                normal_dir, long_dir, segment_id_counter):
-    # (此函數與之前版本完全相同)
-    if not os.path.exists(temp_filename) or segment_frames_written == 0:
-        if os.path.exists(temp_filename):
-            try: os.remove(temp_filename)
-            except OSError as e: print(f"刪除空臨時檔 {temp_filename} 時出錯: {e}")
-        return
-
-    duration_sec = segment_frames_written / fps
-    final_base_name = f"segment_{segment_id_counter:03d}.mp4"
-
-    if duration_sec < min_duration_sec:
-        print(f"片段 {final_base_name} ({duration_sec:.1f}s) 過短 (<{min_duration_sec}s)，已刪除。")
-        try: os.remove(temp_filename)
-        except OSError as e: print(f"刪除過短片段時出錯 {temp_filename}: {e}")
-    elif duration_sec > long_threshold_sec:
-        target_filename = os.path.join(long_dir, final_base_name)
-        print(f"片段 {final_base_name} ({duration_sec:.1f}s) 為長片段 (>{long_threshold_sec}s)，移動到: {target_filename}")
-        try: os.rename(temp_filename, target_filename)
-        except OSError as e: print(f"移動長片段時出錯 {temp_filename} -> {target_filename}: {e}")
-    else: # 普通片段
-        target_filename = os.path.join(normal_dir, final_base_name)
-        print(f"片段 {final_base_name} ({duration_sec:.1f}s) 為普通片段，移動到: {target_filename}")
-        try: os.rename(temp_filename, target_filename)
-        except OSError as e: print(f"移動普通片段時出錯 {temp_filename} -> {target_filename}: {e}")
-
 def get_roi_image(frame, roi_coords, frame_width, frame_height):
-    # (此函數與之前版本相同)
     x, y, w, h = roi_coords
     if not (0 <= x < frame_width and 0 <= y < frame_height and x + w <= frame_width and y + h <= frame_height and w > 0 and h > 0):
         return None
     roi_img = frame[y:y+h, x:x+w]
     return cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
 
+def finalize_segment_and_log_score(temp_filename, segment_frames_written, fps, min_duration_sec, long_threshold_sec,
+                                     normal_dir, long_dir, segment_id_counter, scoring_team):
+    if not os.path.exists(temp_filename) or segment_frames_written == 0:
+        if os.path.exists(temp_filename):
+            try: os.remove(temp_filename)
+            except OSError as e: print(f"刪除空臨時檔 {temp_filename} 時出錯: {e}")
+        return None
+
+    duration_sec = segment_frames_written / fps
+    final_base_name = f"segment_{segment_id_counter:03d}_{scoring_team}.mp4"
+
+    segment_data = {
+        "Segment_Name": final_base_name,
+        "Duration_Seconds": round(duration_sec, 2),
+        "Scoring_Team": scoring_team,
+        "Status": "",
+        "Final_Path": ""
+    }
+
+    if duration_sec < min_duration_sec:
+        print(f"片段 {final_base_name} ({duration_sec:.1f}s) 過短 (<{min_duration_sec}s)，已刪除。")
+        try: os.remove(temp_filename)
+        except OSError as e: print(f"刪除過短片段時出錯 {temp_filename}: {e}")
+        segment_data["Status"] = "Deleted (Too Short)"
+        return segment_data
+    
+    elif duration_sec > long_threshold_sec:
+        target_filename = os.path.join(long_dir, final_base_name)
+        segment_data["Status"] = "Long Segment"
+        segment_data["Final_Path"] = target_filename
+        print(f"片段 {final_base_name} ({duration_sec:.1f}s) 為長片段 (>{long_threshold_sec}s)，移動到: {target_filename}")
+        try: os.rename(temp_filename, target_filename)
+        except OSError as e: print(f"移動長片段時出錯 {temp_filename} -> {target_filename}: {e}")
+    
+    else:
+        target_filename = os.path.join(normal_dir, final_base_name)
+        segment_data["Status"] = "Normal"
+        segment_data["Final_Path"] = target_filename
+        print(f"片段 {final_base_name} ({duration_sec:.1f}s) 為普通片段，移動到: {target_filename}")
+        try: os.rename(temp_filename, target_filename)
+        except OSError as e: print(f"移動普通片段時出錯 {temp_filename} -> {target_filename}: {e}")
+
+    return segment_data
+
+def write_summary_csv(summary_data, output_dir):
+    if not summary_data:
+        print("沒有可供寫入 CSV 的分析數據。")
+        return
+        
+    csv_path = os.path.join(output_dir, "slicing_summary.csv")
+    headers = ["Segment_Name", "Duration_Seconds", "Scoring_Team", "Status", "Final_Path"]
+    
+    try:
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(summary_data)
+        print(f"\n✅ 分割摘要報告已成功儲存至: {os.path.abspath(csv_path)}")
+    except IOError as e:
+        print(f"\n❌ 寫入 CSV 報告失敗: {e}")
+
 def main():
     args = parse_arguments()
-    # ... (輸出目錄創建邏輯與之前相同) ...
+
+    # 載入 ROI 配置（若指定）
+    roi_team1 = SCORE_ROI_TEAM1
+    roi_team2 = SCORE_ROI_TEAM2
+
+    if args.roi_config:
+        roi_result = load_roi_config(args.roi_config)
+        if roi_result:
+            roi_team1, roi_team2 = roi_result
+        # 若載入失敗，則繼續使用預設值
+
     output_root_abs = os.path.abspath(args.output_dir)
     os.makedirs(output_root_abs, exist_ok=True)
     normal_segments_dir = os.path.join(output_root_abs, "normal_segments")
     long_segments_dir = os.path.join(output_root_abs, "long_segments")
     os.makedirs(normal_segments_dir, exist_ok=True)
     os.makedirs(long_segments_dir, exist_ok=True)
-    temp_dir = os.path.join(output_root_abs, "temp_segments")
+    temp_dir = os.path.join(output_root_abs, "temp")
     os.makedirs(temp_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(args.input)
-    # ... (影片打開和FPS獲取邏輯與之前相同) ...
     if not cap.isOpened(): print(f"錯誤: 無法打開影片 {args.input}"); return
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0: print("錯誤: 無法獲取影片的FPS。"); cap.release(); return
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"輸入影片: {args.input}, FPS: {fps:.2f}")
-    print(f"輸出到: {output_root_abs}")
+
+    ret, first_frame = cap.read()
+    if not ret: print("錯誤：無法讀取影片的第一幀。"); cap.release(); return
+
+    x1, y1, w1, h1 = roi_team1
+    cv2.rectangle(first_frame, (x1, y1), (x1 + w1, y1 + h1), (0, 255, 0), 2)
+    cv2.putText(first_frame, 'Team1 ROI', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    x2, y2, w2, h2 = roi_team2
+    cv2.rectangle(first_frame, (x2, y2), (x2 + w2, y2 + h2), (0, 0, 255), 2)
+    cv2.putText(first_frame, 'Team2 ROI', (x2, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+    print("\n--- ROI 預覽 ---"); print("請檢查 Team1 (綠色) 與 Team2 (紅色) 的框是否正確。"); print("確認後，關閉圖片視窗即可繼續執行...")
+    cv2.imshow('ROI Preview - Press any key to continue', first_frame); cv2.waitKey(0); cv2.destroyAllWindows()
+    
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    
+    print("\n--- 開始處理影片 ---")
+    print(f"輸入影片: {args.input}, FPS: {fps:.2f}"); print(f"輸出到: {output_root_abs}")
     print(f"ROI檢查間隔: {args.roi_check_interval}s, 差異閾值 (SAD): {args.diff_threshold}")
-    print(f"片段最小時長: {args.min_segment_duration}s, 長片段閾值: {args.long_segment_threshold}s")
-
-
-    previous_roi1_gray = None
-    previous_roi2_gray = None
+    print(f"片段最小時長: {args.min_segment_duration}s, 長片段閾值: {args.long_segment_threshold}s\n")
     
-    # is_game_active 仍然用來標記是否正在錄製一個片段
-    is_game_active = False 
-    
-    video_writer = None
-    current_temp_video_path = None
-    segment_id_counter = 0
-    frames_written_this_segment = 0
-
-    frame_idx = 0
-    roi_check_interval_frames = int(fps * args.roi_check_interval)
-    if roi_check_interval_frames == 0: roi_check_interval_frames = 1
-    
-    # 移除了 no_change_timeout_checks 和 frames_since_last_change_or_valid_roi
-    # 因為現在的邏輯是：只要有變化就切，沒有「超時結束片段」的概念了
-
-    # ROI 座標 (確保它們在影片範圍內)
-    rois = {"team1": SCORE_ROI_TEAM1, "team2": SCORE_ROI_TEAM2}
-    for team_name, (rx, ry, rw, rh) in rois.items():
-        if not (0 <= rx < frame_width and 0 <= ry < frame_height and \
-                rx + rw <= frame_width and ry + rh <= frame_height and rw > 0 and rh > 0):
-            print(f"錯誤：{team_name} 的 ROI {rois[team_name]} 超出影片邊界或尺寸無效。")
-            cap.release()
-            return
-
-    first_valid_rois_captured = False # 標記是否已捕獲到第一組有效的ROI作為基線
+    previous_roi1_gray, previous_roi2_gray = None, None
+    is_game_active, video_writer, current_temp_video_path = False, None, None
+    segment_id_counter, frames_written_this_segment = 0, 0
+    slicing_summary = []
+    frame_idx, roi_check_interval_frames = 0, max(1, int(fps * args.roi_check_interval))
+    first_valid_rois_captured = False
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            break
+        if not ret: break
         frame_idx += 1
 
-        # 如果正在錄製一個片段，則寫入影格
-        # 這個寫入判斷移到ROI檢查之後，確保在開始新片段時能包含觸發變化的那一組影格
-        # if is_game_active and video_writer is not None:
-        #     video_writer.write(frame)
-        #     frames_written_this_segment += 1
-
-        if frame_idx % roi_check_interval_frames == 0:
-            current_roi1_gray = get_roi_image(frame, SCORE_ROI_TEAM1, frame_width, frame_height)
-            current_roi2_gray = get_roi_image(frame, SCORE_ROI_TEAM2, frame_width, frame_height)
-
-            if current_roi1_gray is None or current_roi2_gray is None:
-                print(f"影格 {frame_idx}: 一個或多個ROI擷取失敗，跳過此檢查點。")
-                # 如果正在錄製，可以考慮是否因為ROI擷取失敗而結束片段，或暫時忽略
-                # 目前邏輯：如果正在錄製，會繼續錄製，直到下一次成功的ROI比對
-                if is_game_active and video_writer is not None: # 即使ROI失敗也寫入，確保連續性
-                    video_writer.write(frame)
-                    frames_written_this_segment += 1
-                continue # 跳過本次變化的判斷
-
-            if not first_valid_rois_captured: # 捕獲第一組有效的ROI作為比較的基線
-                previous_roi1_gray = current_roi1_gray.copy()
-                previous_roi2_gray = current_roi2_gray.copy()
-                first_valid_rois_captured = True
-                print(f"影格 {frame_idx}: 已捕獲初始ROI狀態。")
-                if is_game_active and video_writer is not None: # 即使ROI失敗也寫入
-                    video_writer.write(frame)
-                    frames_written_this_segment += 1
-                continue
-
-
-            roi1_has_changed = False
-            diff1 = cv2.absdiff(current_roi1_gray, previous_roi1_gray)
-            sad1 = np.sum(diff1)
-            if sad1 > args.diff_threshold:
-                roi1_has_changed = True
-
-            roi2_has_changed = False
-            diff2 = cv2.absdiff(current_roi2_gray, previous_roi2_gray)
-            sad2 = np.sum(diff2)
-            if sad2 > args.diff_threshold:
-                roi2_has_changed = True
-            
-            # print(f"Frame {frame_idx}: SAD1={sad1}, SAD2={sad2}")
-
-            overall_roi_has_changed = roi1_has_changed or roi2_has_changed
-            
-            if overall_roi_has_changed:
-                print(f"影格 {frame_idx}: ROI 偵測到變化 (ROI1 changed: {roi1_has_changed}, ROI2 changed: {roi2_has_changed})")
-                
-                # 如果之前正在錄製一個片段，先結束並儲存它
-                if is_game_active and video_writer is not None:
-                    print(f"--- 因ROI變化，結束片段 (ID: {segment_id_counter:03d}) ---")
-                    video_writer.release()
-                    finalize_segment_processing(current_temp_video_path, frames_written_this_segment, fps,
-                                                args.min_segment_duration, args.long_segment_threshold,
-                                                normal_segments_dir, long_segments_dir, segment_id_counter)
-                    # is_game_active = False # 馬上要開始新的，所以不用設為False
-                
-                # 開始一個新的片段
-                is_game_active = True # 確保是 active
-                segment_id_counter += 1
-                current_temp_video_path = os.path.join(temp_dir, f"segment_{segment_id_counter:03d}_temp.mp4")
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                video_writer = cv2.VideoWriter(current_temp_video_path, fourcc, fps, (frame_width, frame_height))
-                frames_written_this_segment = 0 # 為新片段重置計數
-                print(f"=== 因ROI變化，開始新片段 (ID: {segment_id_counter:03d}) 寫入到: {current_temp_video_path} ===")
-            
-            # 更新 previous_roi_gray 以便下次比較
-            previous_roi1_gray = current_roi1_gray.copy()
-            previous_roi2_gray = current_roi2_gray.copy()
-        
-        # 將影格寫入邏輯移到這裡，確保在ROI檢查和片段開始/結束邏輯之後執行
-        # 這樣可以包含觸發變化的那一組影格（從ROI檢查點開始的整個interval的影格）
         if is_game_active and video_writer is not None:
             video_writer.write(frame)
             frames_written_this_segment += 1
+
+        if frame_idx % roi_check_interval_frames == 0:
+            current_roi1_gray = get_roi_image(frame, roi_team1, frame_width, frame_height)
+            current_roi2_gray = get_roi_image(frame, roi_team2, frame_width, frame_height)
+
+            if current_roi1_gray is None or current_roi2_gray is None: continue
+
+            if not first_valid_rois_captured:
+                previous_roi1_gray, previous_roi2_gray = current_roi1_gray, current_roi2_gray
+                first_valid_rois_captured = True
+                print(f"影格 {frame_idx}: 已捕獲初始ROI狀態，開始錄製第一個片段。")
+                is_game_active = True
+                segment_id_counter = 1
+                current_temp_video_path = os.path.join(temp_dir, f"segment_{segment_id_counter:03d}_temp.mp4")
+                video_writer = cv2.VideoWriter(current_temp_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
+                frames_written_this_segment = 0
+                continue
+
+            sad1 = np.sum(cv2.absdiff(current_roi1_gray, previous_roi1_gray))
+            sad2 = np.sum(cv2.absdiff(current_roi2_gray, previous_roi2_gray))
             
-    # --- 迴圈結束後 ---
-    if video_writer is not None: # 處理影片末尾未結束的片段
-        print(f"--- 影片結束，結束最後片段 (ID: {segment_id_counter:03d}) ---")
+            # ✨ --- 核心修改點 --- ✨
+            # 只有當任一邊的 SAD 超過閾值時，才進行後續判斷與輸出
+            if sad1 > args.diff_threshold or sad2 > args.diff_threshold:
+                scoring_team = "Team1" if sad1 > sad2 else "Team2"
+                
+                # 將SAD值與判斷結果合併成一行輸出
+                print(f"Frame {frame_idx}: 偵測到變化！SAD1={sad1}, SAD2={sad2} -> 得分方: {scoring_team}")
+
+                if video_writer is not None:
+                    video_writer.release()
+                    segment_log = finalize_segment_and_log_score(current_temp_video_path, frames_written_this_segment, fps,
+                                                                 args.min_segment_duration, args.long_segment_threshold,
+                                                                 normal_segments_dir, long_segments_dir, segment_id_counter, scoring_team)
+                    if segment_log: slicing_summary.append(segment_log)
+                
+                segment_id_counter += 1
+                current_temp_video_path = os.path.join(temp_dir, f"segment_{segment_id_counter:03d}_temp.mp4")
+                video_writer = cv2.VideoWriter(current_temp_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
+                frames_written_this_segment = 0
+                print(f"--- 開始錄製新片段 (ID: {segment_id_counter:03d}) ---")
+
+            previous_roi1_gray, previous_roi2_gray = current_roi1_gray, current_roi2_gray
+            
+    if video_writer is not None:
+        print(f"--- 影片結束，結束最後一個片段 (ID: {segment_id_counter:03d}) ---")
         video_writer.release()
-        finalize_segment_processing(current_temp_video_path, frames_written_this_segment, fps,
-                                    args.min_segment_duration, args.long_segment_threshold,
-                                    normal_segments_dir, long_segments_dir, segment_id_counter)
+        segment_log = finalize_segment_and_log_score(current_temp_video_path, frames_written_this_segment, fps,
+                                                     args.min_segment_duration, args.long_segment_threshold,
+                                                     normal_segments_dir, long_segments_dir, segment_id_counter, "End_Of_Video")
+        if segment_log: slicing_summary.append(segment_log)
 
     cap.release()
     cv2.destroyAllWindows()
-    print("\n影片分割處理完成!") # ... (其他打印)
+    
+    write_summary_csv(slicing_summary, output_root_abs)
+    print("\n影片分割與得分分析處理完成!")
 
 if __name__ == "__main__":
     main()

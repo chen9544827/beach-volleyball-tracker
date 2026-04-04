@@ -1,0 +1,23 @@
+{
+    "court_boundary_polygon": [
+        [
+            471,
+            329
+        ],
+        [
+            136,
+            638
+        ],
+        [
+            1158,
+            655
+        ],
+        [
+            802,
+            335
+        ]
+    ],
+    "exclusion_zones": [],
+    "net_y": 276,
+    "background_ball_zones": []
+}

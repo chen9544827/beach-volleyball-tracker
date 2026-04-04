@@ -166,6 +166,8 @@ logs/
 
 # 模型權重與結果
 *.pt
+!models/ball_best.pt
+!models/VballNetV1b_seq9_grayscale_best.onnx
 runs/
 weights/
 dataset/
@@ -180,6 +182,51 @@ __pycache__/
 *json
 *.avi
 *.mp4
+*.7z
+*.zip
+*.png
+*.csv
 # VSCode 設定（如果你用 VSCode）
 .vscode/
 
+# AI 工具配置檔案
+.ralph/
+cline_mcp_settings.json
+
+# Claude Code 計劃檔案
+.claude/plans/
+
+# 備份檔案
+*-backup-*.zip
+*-backup-*.7z
+
+# 驗證輸出
+verification_output/
+batch_test_output/
+
+# 暫存測試檔案
+nul
+# models/ 整個目錄忽略，但以下例外
+# models/
+predict_output/
+court_configs/backup/
+
+# 嵌套 git repo（子專案，使用 submodule 管理）
+fast-volleyball-tracking-inference/
+vball-net/
+vball-net-pytorch/
+
+# 模型與大型二進位檔案
+*.onnx
+!models/VballNetV1b_seq9_grayscale_best.onnx
+*.keras
+*.h5
+*.pb
+*.tflite
+*.pth
+
+# 輸出結果（分析結果與標注）
+output/
+
+# Claude Code memory（本地個人設定，不應共用）
+.claude/memory/
