@@ -164,10 +164,12 @@ input_video/
 output_data/
 logs/
 
-# 模型權重與結果
+# 模型權重與結果（使用 Git LFS 追蹤大型檔案）
 *.pt
 !models/ball_best.pt
-!models/VballNetV1b_seq9_grayscale_best.onnx
+!models/yolov8m-pose.pt
+!models/yolo11m.pt
+!models/court_best.pt
 runs/
 weights/
 dataset/
@@ -211,14 +213,15 @@ nul
 predict_output/
 court_configs/backup/
 
-# 嵌套 git repo（子專案，使用 submodule 管理）
-fast-volleyball-tracking-inference/
+# 子專案（保留訓練環境，不納入 repo）
 vball-net/
 vball-net-pytorch/
 
-# 模型與大型二進位檔案
+# 模型與大型二進位檔案（使用 Git LFS 追蹤 *.onnx）
 *.onnx
 !models/VballNetV1b_seq9_grayscale_best.onnx
+!models/VballNetV1a_finetuned_seq9_grayscale.onnx
+!fast-volleyball-tracking-inference/models/*.onnx
 *.keras
 *.h5
 *.pb
